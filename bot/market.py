@@ -79,7 +79,8 @@ class Store:
             self.m = None
         rows = []
         while cur < now // MIN * MIN:
-            chunk = klines(self.sym, "1m", cur, now // MIN * MIN - 1)
+            need = (now // MIN * MIN - cur) // MIN + 1
+            chunk = klines(self.sym, "1m", cur, now // MIN * MIN - 1, limit=int(min(1500, max(need, 5))))  # small gap = weight 1
             chunk = [r for r in chunk if r[6] < now]
             if not chunk:
                 break

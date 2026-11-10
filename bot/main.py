@@ -242,6 +242,10 @@ class Bot:
         while True:
             nxt = (now_ms() // MIN + 1) * MIN  # Binance time
             await asyncio.sleep((nxt - now_ms()) / 1000 + 2)
+            # the closing kline of a quiet symbol can come a few seconds late: wait up to 10 s for the
+            # WebSocket before the minute step backfills the missing ones over REST
+            while now_ms() < nxt + 10_000 and any(st.last() != nxt - MIN for st in self.stores.values()):
+                await asyncio.sleep(0.25)
             try:
                 await asyncio.to_thread(self.minute, nxt)
             except Exception as e:
