@@ -38,6 +38,7 @@ KILL_SWITCH_FILE = os.path.join(ROOT, env_str("KILL_SWITCH_FILE", "KILL_SWITCH")
 
 # REST client settings (same as binance_ai_bot_vp)
 REST_THROTTLE_SECONDS = env_float("REST_THROTTLE_SECONDS", 0.15)
+OWN_WEIGHT_PER_MIN = env_float("OWN_WEIGHT_PER_MIN", 500)  # this bot's REST weight per minute (IP limit 2400 is shared)
 REST_MAX_RETRIES = int(env_float("REST_MAX_RETRIES", 4))
 REST_TIMEOUT_SECONDS = int(env_float("REST_TIMEOUT_SECONDS", 15))
 UNIVERSE_QUOTE_ASSET = "USDT"

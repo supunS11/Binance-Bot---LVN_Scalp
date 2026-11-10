@@ -110,6 +110,38 @@ class ApiError(Exception):
         return self.code in RETRYABLE_CODES
 
 
+class OwnBudget:
+    """This bot's own weight per clock minute, shared by every RestClient in the process.
+
+    The IP limit (2400 / min) is shared with any other bot on the same machine. The headers show the IP
+    total, so a bot that only watches them can still push the total over the limit when the other bot
+    bursts later in the same minute. Market-data requests therefore wait once this bot has used
+    OWN_WEIGHT_PER_MIN in the current minute. Orders and signed account calls never wait here (they are
+    counted, and they are small).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._minute = 0
+        self._used = 0
+
+    def take(self, weight, may_wait):
+        limit = config.OWN_WEIGHT_PER_MIN
+        while True:
+            with self._lock:
+                minute = int(time.time() // 60)
+                if minute != self._minute:
+                    self._minute, self._used = minute, 0
+                if not may_wait or limit <= 0 or self._used + weight <= limit or self._used == 0:
+                    self._used += weight
+                    return
+                pause = (minute + 1) * 60 - time.time() + 0.5
+            time.sleep(max(pause, 0.5))
+
+
+OWN_BUDGET = OwnBudget()
+
+
 class RateLimiter:
     """Weight and order-count budget, driven by the venue's own headers.
 
@@ -227,6 +259,7 @@ class RestClient:
 
         while True:
             attempt += 1
+            OWN_BUDGET.take(weight, may_wait=not (is_order or signed))
             self.limiter.wait(is_order=is_order)
 
             if signed:

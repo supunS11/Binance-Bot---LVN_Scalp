@@ -49,6 +49,18 @@ def to_bars(rows, now):
     return dict(t=a[:, 0].astype(np.int64), o=a[:, 1], h=a[:, 2], l=a[:, 3], c=a[:, 4], v=a[:, 5], tb=a[:, 6], tc=a[:, 7].astype(np.int64))
 
 
+def _merge(old, new, keep):
+    """Appends the closed bars of `new` that are newer than `old`. Returns None on a gap (full download due)."""
+    k = new["t"] > old["t"][-1]
+    if not k.any():
+        return old
+    step = old["t"][-1] - old["t"][-2]
+    if new["t"][k][0] - old["t"][-1] != step:
+        return None
+    out = {c: np.r_[old[c], new[c][k]] for c in old}
+    return {c: v[-keep:] for c, v in out.items()}
+
+
 class Store:
     """Closed 1m candles of one symbol (last DAYS_1M days) + native 1H / 4H candles for the trend filters."""
 
@@ -127,5 +139,15 @@ class Store:
         now = now_ms()
         if not force and self.h1 is not None and self.h1["tc"][-1] >= now // (60 * MIN) * (60 * MIN):
             return
-        self.h1 = to_bars(klines(self.sym, "1h", limit=C.HTF_BARS + 1), now)
-        self.h4 = to_bars(klines(self.sym, "4h", limit=C.CTX_BARS + 1), now)
+        if force or self.h1 is None:
+            self.h1 = to_bars(klines(self.sym, "1h", limit=C.HTF_BARS + 1), now)
+            self.h4 = to_bars(klines(self.sym, "4h", limit=C.CTX_BARS + 1), now)
+            return
+        # hourly: only the newest candles (weight 1 instead of 10 + 5), merged by open time
+        h1 = _merge(self.h1, to_bars(klines(self.sym, "1h", limit=4), now), C.HTF_BARS)
+        h4 = self.h4
+        if h4["tc"][-1] < now // (240 * MIN) * (240 * MIN):
+            h4 = _merge(h4, to_bars(klines(self.sym, "4h", limit=4), now), C.CTX_BARS)
+        if h1 is None or h4 is None:
+            return self.refresh_htf(force=True)
+        self.h1, self.h4 = h1, h4
