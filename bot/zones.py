@@ -92,7 +92,7 @@ def entry_zone_why(snap, z):
     if C.REQUIRE_NESTED and not (z["nested"] and z["parent"]):
         why.append("not NESTED in a live 1H LVN")
     if z["stop_pct"] < C.MIN_STOP:
-        why.append(f"zone stop {z['stop_pct']:.2f}% < {C.MIN_STOP}%")
+        why.append(f"zone stop {z['stop_pct']:.3f}% < {C.MIN_STOP}%")
     if z["dist_atr"] <= 0:
         why.append("price already past the near edge")
     return why + trend_ok(snap, z["dir"])
