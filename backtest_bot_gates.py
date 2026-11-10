@@ -20,6 +20,11 @@ Variants (all thresholds = the bot's config, fixed before the first run):
      still cut in front of a fresh opposing zone
   G  retest entry: if RR at the CHoCH close is < 2, a limit at the broken CHoCH level instead (RR >= 2 at that
      price), valid 30 1m candles, cancelled if the target trades before the fill. RR >= 2 at the close = as A.
+  Confirmation at the zone instead of CHoCH (stop / target as C: far edge + 0.5 ATR, leg extreme; first trigger
+  within 30 min of the touch only; entry at the next 1m open, RR >= 2 after fees):
+  H  rejection candle: first 1m close back beyond the near edge (long: close > near edge)
+  I  order flow candle: a 1m candle inside the zone, close >= open (long), with 2 of 3: absorption on it, its own
+     delta / volume >= +0.10, CVD divergence on the approach
 
     VARIANTS=ACEFG OUT=backtest_rr_fixes_report.md python backtest_bot_gates.py
 
@@ -46,7 +51,8 @@ FIVE, DAY = 5 * MIN, 86_400_000
 VARIANTS = tuple(os.environ.get("VARIANTS", "ABCD"))
 OUT = os.environ.get("OUT", "backtest_bot_gates_report.md")
 RETEST_MIN = 30
-NAMES = {"E": "E: A with min RR 1.5", "F": "F: A with the target at the 1.272 extension",
+NAMES = {"H": "H: rejection candle at the zone (1m close back beyond the near edge)",
+         "I": "I: order flow candle at the zone (2 of: absorption, delta flip, CVD divergence)", "E": "E: A with min RR 1.5", "F": "F: A with the target at the 1.272 extension",
          "G": "G: A, retest limit at the CHoCH level when RR at the close < 2","A": "A: bot as live (CHoCH + 2 of 5 order flow gates; liq / book not in data)", "B": "B: CHoCH only, no order flow gates",
          "C": "C: limit at the near edge, no confirmation", "D": "D: A without the 4H filter"}
 
@@ -167,6 +173,7 @@ def job(spec):
 
     gates = dict(A=(orig_trend, orig_abs, orig_shift), E=(orig_trend, orig_abs, orig_shift),
                  F=(orig_trend, orig_abs, orig_shift), G=(orig_trend, orig_abs, orig_shift),
+                 H=(orig_trend, orig_abs, orig_shift), I=(orig_trend, orig_abs, orig_shift),
                  B=(orig_trend, lambda m_, i0, i1, *a: i1, lambda *a: (True, 0.0, 0.0)),
                  C=(orig_trend, orig_abs, orig_shift),
                  D=(trend_no4h, orig_abs, orig_shift))
@@ -194,10 +201,53 @@ def job(spec):
             self._end(w, "SIGNAL")
             return dict(sym=self.sym, dir=d, key=w["key"], kind=w["kind"], t=int(mm["t"][k]) + MIN, k_fill=k, **plan)
 
+    from bot.orderflow import absorption as of_abs, delta_frac
+
+    class ZoneConfirmWatcher(W.Watcher):
+        """H / I: a confirmation candle at the zone within 30 min of the touch, no CHoCH."""
+        mode = "H"
+
+        def _step(self, w, k):
+            mm, d = self.store.m, w["dir"]
+            tk, h, l, c, o = int(mm["t"][k]), mm["h"][k], mm["l"][k], mm["c"][k], mm["o"][k]
+            if tk - w["t_touch"] >= 30 * MIN:
+                self._end(w, "no confirmation within 30 min of the touch")
+                return None
+            if (c < w["far"]) if d == 1 else (c > w["far"]):
+                self._end(w, "1m close beyond the far edge (zone failed)")
+                return None
+            if (h >= w["leg_ext"]) if d == 1 else (l <= w["leg_ext"]):
+                self._end(w, "price reached the leg extreme before a confirmation")
+                return None
+            if self.mode == "H":
+                ok = (c > w["near"]) if d == 1 else (c < w["near"])
+            else:
+                inside = l <= w["top"] and h >= w["bot"]
+                body = (c >= o) if d == 1 else (c <= o)
+                votes = [of_abs(mm, k, k, w["top"], w["bot"], d) is not None,
+                         d * delta_frac(mm, k) >= C.FLIP_DELTA, bool(w["cvd_div"])]
+                ok = inside and body and sum(votes) >= 2
+            if not ok or W.trend_ok(self.snap, d):
+                return None
+            journal.write("MARK", mark=self.mode)
+            plan, why = P.make_plan(d, float(c), w["far"], w["far"], self.snap["atr5"], w["leg_ext"], self.snap["obstacles"])
+            if why:
+                journal.write("CONFIRM_REJECT", why=[why])
+                self._end(w, "confirmation candle, plan rejected")
+                return None
+            self._end(w, "SIGNAL")
+            return dict(sym=self.sym, dir=d, key=w["key"], kind=w["kind"], t=tk + MIN, **plan)
+
+    class HWatcher(ZoneConfirmWatcher):
+        mode = "H"
+
+    class IWatcher(ZoneConfirmWatcher):
+        mode = "I"
+
     watchers = {}
     for v in VARIANTS:
         cur["v"] = v
-        wt = (LimitWatcher if v == "C" else RetestWatcher if v == "G" else W.Watcher)(store, flow)
+        wt = dict(C=LimitWatcher, G=RetestWatcher, H=HWatcher, I=IWatcher).get(v, W.Watcher)(store, flow)
         wt.warmup()
         watchers[v] = wt
     signals = {v: [] for v in VARIANTS}
