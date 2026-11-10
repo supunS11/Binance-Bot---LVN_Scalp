@@ -1,14 +1,18 @@
 """Order flow at the zone, from closed 1m candles (taker buy volume) + live liquidation / order book streams.
 
-Two HARD gates, both needed for an entry (same idea and values as binance_ai_bot_vp's zone watch):
+Five gates, checked at the confirmation candle. A signal needs at least OF_MIN_PASS of them (default 2 of 5).
+Missing data (no fresh book, no liquidations) = that gate fails.
   ABSORPTION  a 1m candle at the zone with big volume (>= 2 x median of the 20 candles before it), where the
               aggressive side was AGAINST the trade (long: taker sells >= 0.20 of volume more than buys) but
               price did not follow (long: close >= open). Sellers hit the zone hard and were absorbed.
   DELTA SHIFT from the reaction extreme (lowest 1m low since the touch, for a long) to the confirmation candle,
               net taker delta is in the trade direction, and the confirmation candle's own delta / volume is
               >= 0.10 in the trade direction. Buyers took over.
-Recorded only (logged with every decision, not a gate yet): CVD divergence on the approach, liquidations against
-the trade side during the watch, order book imbalance near price at the confirmation.
+  CVD DIVERGENCE on the approach (12 1m candles before the touch): price made a new low (long) but CVD a higher low.
+  LIQUIDATION FLUSH during the watch (touch to confirmation): the losing side (long: longs) was liquidated,
+              > 0 USD and >= LIQ_DOMINANCE x the other side. Weak hands flushed out into the zone.
+  BOOK IMBALANCE at the confirmation: (bid - ask) / (bid + ask) of the top-20 book within 1 x 5m ATR of price,
+              >= BOOK_IMB in the trade direction (long: bids heavier), from a book no older than 5 s.
 """
 import collections
 import threading
@@ -63,6 +67,16 @@ def cvd_divergence(m, k_touch, d, n=12):
     return bool(hi[b] > hi[a] and cvd[b] < cvd[a])
 
 
+def liq_flush(liq, d):
+    """(ok, USD against = the losing side liquidated, USD on the other side). liq = LiveFlow.liquidations()."""
+    against, other = (liq.get("SELL", 0.0), liq.get("BUY", 0.0)) if d == 1 else (liq.get("BUY", 0.0), liq.get("SELL", 0.0))
+    return against > 0 and against >= C.LIQ_DOMINANCE * other, against, other
+
+
+def book_ok(imb, d):
+    return imb is not None and d * imb >= C.BOOK_IMB
+
+
 class LiveFlow:
     """Liquidations (all symbols, !forceOrder@arr) and the latest top-20 order book of watched symbols."""
 
@@ -80,6 +94,15 @@ class LiveFlow:
             self.book[sym] = (int(data["E"]), [(float(p), float(q)) for p, q in data["b"]],
                               [(float(p), float(q)) for p, q in data["a"]])
 
+    def liquidations(self, sym, t0, t1):
+        """USD liquidated in [t0, t1] by order side: SELL = longs liquidated, BUY = shorts liquidated."""
+        out = {"SELL": 0.0, "BUY": 0.0}
+        with self.lock:
+            for t, s, u in self.liq.get(sym, ()):
+                if t0 <= t <= t1:
+                    out[s] = out.get(s, 0.0) + u
+        return out
+
     def liquidations_against(self, sym, d, t0, t1):
         """USD of positions on the losing side liquidated in [t0, t1]. Long trade: longs liquidated (SELL orders)."""
         side = "SELL" if d == 1 else "BUY"
@@ -87,11 +110,11 @@ class LiveFlow:
             return sum(u for t, s, u in self.liq.get(sym, ()) if s == side and t0 <= t <= t1)
 
     def imbalance(self, sym, mid, width, now_ms, max_age_ms=5000):
-        """(bid qty / ask qty) within `width` of mid, from a book no older than 5 s. None = no fresh book."""
+        """(bid - ask) / (bid + ask) qty within `width` of mid, from a book no older than 5 s. None = no fresh book."""
         with self.lock:
             b = self.book.get(sym)
         if b is None or now_ms - b[0] > max_age_ms:
             return None
         bid = sum(q for p, q in b[1] if p >= mid - width)
         ask = sum(q for p, q in b[2] if p <= mid + width)
-        return bid / ask if ask > 0 else None
+        return (bid - ask) / (bid + ask) if bid + ask > 0 else None

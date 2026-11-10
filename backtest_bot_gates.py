@@ -9,7 +9,8 @@ absorption, delta shift, structure SL / TP, RR >= 2 after fees). Only the data s
   - the Watcher gets the 1m candles one by one, never a candle after the one it is on.
 
 Variants (all thresholds = the bot's config, fixed before the first run):
-  A  bot as it runs live: CHoCH + absorption + delta shift
+  A  bot as it runs live: CHoCH + at least 2 of 5 order flow gates. Liquidations and the order book are not in the
+     cache, so those two gates always fail here: in the backtest A = 2 of (absorption, delta shift, CVD divergence).
   B  CHoCH only (no order flow gates)
   C  no confirmation: limit at the near edge at the touch (same WAIT / SLOW / trend / zone choice, same SL / TP rules)
   D  A without the 4H trend filter
@@ -34,7 +35,7 @@ from backtest_scalp_1h5m import strength
 
 FIVE, DAY = 5 * MIN, 86_400_000
 VARIANTS = ("A", "B", "C", "D")
-NAMES = {"A": "A: bot as live (CHoCH + absorption + delta shift)", "B": "B: CHoCH only, no order flow gates",
+NAMES = {"A": "A: bot as live (CHoCH + 2 of 5 order flow gates; liq / book not in data)", "B": "B: CHoCH only, no order flow gates",
          "C": "C: limit at the near edge, no confirmation", "D": "D: A without the 4H filter"}
 
 
@@ -121,7 +122,7 @@ def job(spec):
     cur = dict(v="A", t=0)
     journal.write = lambda event, **row: events[cur["v"]].append((cur["t"], event, _why(row), (row.get("zone") or {}).get("key")))
     W.now_ms = lambda: 0
-    flow = types.SimpleNamespace(liquidations_against=lambda *a: 0, imbalance=lambda *a: None)
+    flow = types.SimpleNamespace(liquidations=lambda *a: {"SELL": 0.0, "BUY": 0.0}, imbalance=lambda *a: None)
     orig_trend, orig_abs, orig_shift = Z.trend_ok, W.absorption, W.delta_shift
 
     def trend_no4h(snap, d):
@@ -163,10 +164,13 @@ def job(spec):
         watchers[v] = wt
     signals = {v: [] for v in VARIANTS}
 
+    of_min = C.OF_MIN_PASS
+
     def set_gates(v):
         tr, ab, sh = gates[v]
         Z.trend_ok = W.trend_ok = tr
         W.absorption, W.delta_shift = ab, sh
+        C.OF_MIN_PASS = 0 if v == "B" else of_min
         cur["v"] = v
 
     def on_close(j, live, bc):

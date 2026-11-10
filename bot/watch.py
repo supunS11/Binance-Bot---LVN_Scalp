@@ -16,7 +16,8 @@ WATCH     every closed 1m candle, until one of:
             - price reaches the leg extreme first -> the move left without us.
             - the engine marks the zone FILLED / BROKEN / LEG INVALID.
             - CONFIRMATION (CHoCH by default, see bot.structure) -> gates:
-                trend still OK, ABSORPTION at the zone, DELTA SHIFT (bot.orderflow), RR >= 2 after fees (bot.plan).
+                trend still OK, RR >= 2 after fees (bot.plan), and at least OF_MIN_PASS (2) of the 5 order flow gates
+                (bot.orderflow): ABSORPTION, DELTA SHIFT, CVD DIVERGENCE, LIQUIDATION FLUSH, BOOK IMBALANCE.
               All pass -> SIGNAL. Any fails -> logged, keep watching for the next mark (BOS); after BOS -> ended.
 """
 import logging
@@ -28,7 +29,7 @@ from bot import config as C
 from bot import journal
 from bot.config import MIN
 from bot.market import now_ms
-from bot.orderflow import absorption, cvd_divergence, delta_shift
+from bot.orderflow import absorption, book_ok, cvd_divergence, delta_shift, liq_flush
 from bot.plan import make_plan
 from bot.structure import LtfSwings, React
 from bot.zones import entry_zone_why, trend_ok
@@ -241,18 +242,21 @@ class Watcher:
         i_touch = int(np.searchsorted(m["t"], w["t_touch"]))
         i_ext = int(np.searchsorted(m["t"], w["t_ext"]))
         ab = absorption(m, i_touch, k, w["top"], w["bot"], d)
-        if ab is None:
-            why.append("no ABSORPTION at the zone (big volume with the other side aggressive, price held)")
         ok, net, df = delta_shift(m, i_ext, k, d)
-        if not ok:
-            why.append(f"no DELTA SHIFT (net delta from the extreme {net:+.4g}, confirm candle {df:+.2f})")
         plan, pwhy = make_plan(d, c, w["far"], w["ext_px"], snap["atr5"], w["leg_ext"], snap["obstacles"])
         if pwhy:
             why.append(pwhy)
         now = t + MIN
-        mods = dict(cvd_divergence=w["cvd_div"],
-                    liq_against_usd=round(self.flow.liquidations_against(self.sym, d, w["t_touch"], now)),
-                    book_imbalance=self.flow.imbalance(self.sym, c, snap["atr5"], now_ms()))
+        liq_ok, liq_against, liq_other = liq_flush(self.flow.liquidations(self.sym, w["t_touch"], now), d)
+        imb = self.flow.imbalance(self.sym, c, snap["atr5"], now_ms())
+        gates = dict(absorption=ab is not None, delta_shift=bool(ok), cvd_divergence=bool(w["cvd_div"]),
+                     liq_flush=bool(liq_ok), book_imbalance=book_ok(imb, d))
+        passed = [g for g, v in gates.items() if v]
+        if len(passed) < C.OF_MIN_PASS:
+            why.append(f"order flow {len(passed)}/5 < {C.OF_MIN_PASS} (passed: {', '.join(passed) or 'none'})")
+        mods = dict(gates=gates, passed=len(passed), cvd_divergence=w["cvd_div"],
+                    liq_against_usd=round(liq_against), liq_other_usd=round(liq_other),
+                    book_imbalance=None if imb is None else round(imb, 3))
         row = dict(sym=self.sym, key=w["key"], kind=w["kind"], side=w["side"], mark=mark, close=c,
                    absorption_at=None if ab is None else int(m["t"][ab]), net_delta=net, confirm_delta=df,
                    plan=plan, modifiers=mods)

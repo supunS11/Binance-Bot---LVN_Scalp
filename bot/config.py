@@ -73,6 +73,9 @@ LTF_SWING_ATR = 3.0  # Pine "Intrabar swing size": 1m swings of 3 x ATR(14, 1m)
 ABSORB_VOL_X = env_float("ABSORB_VOL_X", 2.0)  # absorption bar volume >= 2 x median of the 20 bars before it
 ABSORB_DELTA = env_float("ABSORB_DELTA", 0.20)  # ... with taker sells (long) >= 20% more than buys: delta / volume <= -0.20
 FLIP_DELTA = env_float("FLIP_DELTA", 0.10)  # confirmation candle: delta / volume >= +0.10 in the trade direction
+LIQ_DOMINANCE = env_float("LIQ_DOMINANCE", 2.0)  # liquidation flush: losing-side liquidations >= 2 x the other side (and > 0)
+BOOK_IMB = env_float("BOOK_IMB", 0.20)  # book imbalance (bid - ask) / (bid + ask) within 1 x 5m ATR of price, in the trade direction
+OF_MIN_PASS = int(env_float("OF_MIN_PASS", 2))  # order flow: signal when at least this many of the 5 gates pass (0 = off)
 
 # Stop / target
 SL_BUFFER_ATR = env_float("SL_BUFFER_ATR", 0.50)  # beyond the zone far edge and the reaction low (Pine slAtr)
