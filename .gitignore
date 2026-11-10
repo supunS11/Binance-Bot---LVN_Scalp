@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime output
+bot_cache/
+live/
+logs/
+*.log
+KILL_SWITCH
+
+# Candle caches (large, re-downloaded from Binance)
+cache/
+scan_cache/

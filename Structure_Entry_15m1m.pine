@@ -1,0 +1,255 @@
+//@version=5
+// Structure Entry 15m/1m
+// 15m trend: BOS on a close beyond the last swing. The low that led to the BOS is protected; the trend only
+// changes on a close beyond it, so a minor swing inside a pullback does not flip the trend.
+// Pullback that holds the protected swing -> 1m (chart) LH + LL, CHoCH above the last LH, then 1m BOS (mirror for shorts).
+// Entry on the next 15m candle that closes in the trend direction. Stop beyond the pullback extreme (the HL), target the prior extreme (the HH).
+// 15m structure uses closed bars only (no repaint). Signals appear on closed chart bars.
+indicator("Structure Entry 15m1m", shorttitle = "Structure 1m", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+// ───────────────────────── Inputs ─────────────────────────
+string GT = "Structure"
+htfRes   = input.timeframe("15", "Trend TF", group = GT)
+htfPiv   = input.int(3, "Trend TF swing pivot length", minval = 1, group = GT)
+chartPiv = input.int(2, "Chart swing pivot length", minval = 1, group = GT)
+minPb    = input.float(0.30, "Min pullback (share of protected swing -> extreme)", step = 0.05, group = GT)
+confirm  = input.string("BOS after CHoCH", "Chart confirmation", options = ["BOS after CHoCH", "CHoCH"], group = GT)
+entryOn  = input.string("Trend TF close", "Entry on", options = ["Trend TF close", "Chart close"], group = GT)
+
+string GR = "Risk"
+slBuf    = input.float(0.10, "Stop beyond pullback extreme (x Trend TF ATR)", step = 0.05, group = GR)
+oneEntry = input.bool(true, "One entry per pullback", group = GR, tooltip = "On: after an entry, no new entry until price makes a new extreme. Off: a new low after the entry allows another one.")
+minRR    = input.float(0.0, "Min RR to the prior extreme (0 = off)", step = 0.5, group = GR)
+
+string GD = "Display"
+showProt = input.bool(true, "Show protected swing", group = GD)
+showConf = input.bool(true, "Mark chart confirmation", group = GD)
+showTbl  = input.bool(true, "Show info table", group = GD)
+lineLen  = input.int(30, "Entry / SL / TP line length (bars)", minval = 5, group = GD)
+
+if timeframe.in_seconds(timeframe.period) >= timeframe.in_seconds(htfRes)
+    runtime.error("Chart timeframe must be lower than the Trend TF, e.g. 1m chart with 15m.")
+
+// ───────────────────────── Side tracker ─────────────────────────
+// Prices are signed: a short side sees -low as its high, so both sides run the same logic.
+type Side
+    int   dir
+    float ext    = na
+    int   tExt   = 0
+    float pb     = na
+    float lh     = na
+    int   tLh    = 0
+    float refL   = na
+    float lastL  = na
+    int   tLastL = 0
+    bool  dead   = false
+    bool  fired  = false
+    float sigPb  = na
+    bool  choch  = false
+    int   tChoch = 0
+    float bos    = na
+    float pend   = na
+    bool  entered = false
+
+// Forget the chart structure, keep the pullback extreme
+method clearStruct(Side s) =>
+    s.lh     := na
+    s.tLh    := 0
+    s.refL   := na
+    s.lastL  := na
+    s.tLastL := 0
+    s.fired  := false
+    s.choch  := false
+    s.tChoch := 0
+    s.bos    := na
+    true
+
+// Feeds one closed chart bar. Returns the signed pullback extreme when the chart confirms, else na.
+method step(Side s, bool active, float hi, float lo, float cl, float ph, int tPh, float pl, int tPl, float prot) =>
+    float sig = na
+    if not active
+        s.ext  := na
+        s.pb   := na
+        s.pend := na
+        s.dead := false
+        s.entered := false
+        s.clearStruct()
+    else if na(s.ext) or hi > s.ext
+        s.ext  := hi
+        s.tExt := time
+        s.pb   := na
+        s.pend := na
+        s.dead := false
+        s.entered := false
+        s.clearStruct()
+    else
+        s.pb := na(s.pb) ? lo : math.min(s.pb, lo)
+        // a new low after a confirmation = that pullback was not over: look for a new confirmation
+        if s.fired and lo < s.sigPb and not (oneEntry and s.entered)
+            s.fired  := false
+            s.choch  := false
+            s.tChoch := 0
+            s.bos    := na
+        if not na(pl) and tPl > s.tExt
+            s.lastL  := pl
+            s.tLastL := tPl
+        if not na(ph) and tPh > s.tExt and ph < s.ext
+            s.lh   := ph
+            s.tLh  := tPh
+            s.refL := s.lastL
+            if s.choch and tPh > s.tChoch
+                s.bos := ph
+        // a wick through the protected swing is allowed: only a Trend TF close beyond it ends the trend
+        if na(prot)
+            s.dead := true
+        if not s.dead and not s.fired
+            bool deep = (s.ext - s.pb) / (s.ext - prot) >= minPb
+            bool ll   = not na(s.lh) and not na(s.lastL) and s.tLastL > s.tLh and (na(s.refL) or s.lastL < s.refL)
+            if s.choch
+                if not na(s.bos) and cl > s.bos
+                    sig := s.pb
+            else if deep and ll and cl > s.lh
+                if confirm == "CHoCH"
+                    sig := s.pb
+                else
+                    s.choch  := true
+                    s.tChoch := time
+            if not na(sig)
+                s.fired := true
+                s.sigPb := sig
+    sig
+
+// ───────────────────────── Data ─────────────────────────
+// [1] + lookahead_on = values of the last CLOSED Trend TF bar -> no repaint
+[hH, hL, hC, hT, hPh, hPl, hAtr] = request.security(syminfo.tickerid, htfRes, [high[1], low[1], close[1], time[1], ta.pivothigh(high, htfPiv, htfPiv)[1], ta.pivotlow(low, htfPiv, htfPiv)[1], ta.atr(14)[1]], lookahead = barmerge.lookahead_on)
+float curOpen = request.security(syminfo.tickerid, htfRes, open, lookahead = barmerge.lookahead_on)
+int  htfChg = ta.change(hT)
+bool htfNew = not na(hT) and not na(htfChg) and htfChg != 0
+bool htfEnd = time_close == time_close(htfRes)
+
+float cPh  = ta.pivothigh(high, chartPiv, chartPiv)
+float cPl  = ta.pivotlow(low, chartPiv, chartPiv)
+int   tPiv = time[chartPiv]
+
+var array<float> arrH = array.new_float()
+var array<float> arrL = array.new_float()
+var int   trend    = 0
+var float swingH   = na
+var float swingL   = na
+var int   swingHi  = 0
+var int   swingLi  = 0
+var bool  hBroken  = true
+var bool  lBroken  = true
+var float protL    = na
+var float protH    = na
+var int   protI    = 0
+var Side  longS    = Side.new(1)
+var Side  shortS   = Side.new(-1)
+var string lastSig = "none"
+
+// Most extreme value of a from index i0 to the end, as [value, index]
+f_extreme(array<float> a, int i0, bool wantMax) =>
+    float v = a.get(i0)
+    int   ix = i0
+    for k = i0 to a.size() - 1
+        if wantMax ? a.get(k) > v : a.get(k) < v
+            v  := a.get(k)
+            ix := k
+    [v, ix]
+
+f_signal(int dir, float signedPb, float signedExt) =>
+    float sl   = dir * (signedPb - slBuf * hAtr)
+    float tp   = dir * signedExt
+    float risk = (close - sl) * dir
+    float gain = (tp - close) * dir
+    string res = ""
+    if risk > 0 and gain > 0 and gain >= minRR * risk
+        string txt = (dir == 1 ? "LONG " : "SHORT ") + str.tostring(close, format.mintick) + "\nSL " + str.tostring(sl, format.mintick) + "\nTP " + str.tostring(tp, format.mintick)
+        label.new(bar_index, dir == 1 ? low : high, txt, style = dir == 1 ? label.style_label_up : label.style_label_down, color = dir == 1 ? color.new(color.green, 10) : color.new(color.red, 10), textcolor = color.white, size = size.small)
+        line.new(bar_index, close, bar_index + lineLen, close, color = color.gray)
+        line.new(bar_index, sl, bar_index + lineLen, sl, color = color.red)
+        line.new(bar_index, tp, bar_index + lineLen, tp, color = color.green)
+        alert(txt + "\n" + syminfo.ticker, alert.freq_once_per_bar_close)
+        res := (dir == 1 ? "LONG " : "SHORT ") + str.tostring(close, format.mintick)
+    res
+
+// Chart confirmation -> entry now or wait for a Trend TF candle closing in the trend direction
+f_entry(Side s, float sig, float signedClose, float signedOpen, float signedLow) =>
+    string res = ""
+    if not na(s.pend) and signedLow < s.pend
+        s.pend := na
+    if not na(sig)
+        s.pend := sig
+        if showConf
+            label.new(bar_index, s.dir == 1 ? high : low, confirm + " ok", style = s.dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.blue, 30), textcolor = color.white, size = size.tiny)
+    if not na(s.pend) and (entryOn == "Chart close" or (htfEnd and signedClose > signedOpen))
+        res := f_signal(s.dir, s.pend, s.ext)
+        s.pend := na
+        if res != ""
+            s.entered := true
+    res
+
+// ───────────────────────── Main (closed bars only) ─────────────────────────
+if barstate.isconfirmed
+    if htfNew
+        arrH.push(hH)
+        arrL.push(hL)
+        int nowI = arrH.size() - 1
+        if not na(hPh) and nowI - htfPiv >= 0
+            swingH  := hPh
+            swingHi := nowI - htfPiv
+            hBroken := false
+        if not na(hPl) and nowI - htfPiv >= 0
+            swingL  := hPl
+            swingLi := nowI - htfPiv
+            lBroken := false
+        if not hBroken and hC > swingH
+            hBroken := true
+            if trend >= 0
+                [v, ix] = f_extreme(arrL, swingHi, false)
+                protL := v
+                protI := ix
+                trend := 1
+        if not lBroken and hC < swingL
+            lBroken := true
+            if trend <= 0
+                [v, ix] = f_extreme(arrH, swingLi, true)
+                protH := v
+                protI := ix
+                trend := -1
+        if trend == 1 and not na(protL) and hC < protL
+            [v, ix] = f_extreme(arrH, protI, true)
+            protH := v
+            protI := ix
+            trend := -1
+            lBroken := true
+        else if trend == -1 and not na(protH) and hC > protH
+            [v, ix] = f_extreme(arrL, protI, false)
+            protL := v
+            protI := ix
+            trend := 1
+            hBroken := true
+    float sL = longS.step(trend == 1, high, low, close, cPh, tPiv, cPl, tPiv, protL)
+    float sS = shortS.step(trend == -1, -low, -high, -close, na(cPl) ? na : -cPl, tPiv, na(cPh) ? na : -cPh, tPiv, -protH)
+    string rL = f_entry(longS, sL, close, curOpen, low)
+    string rS = f_entry(shortS, sS, -close, -curOpen, -high)
+    if rL != ""
+        lastSig := rL
+    if rS != ""
+        lastSig := rS
+
+// ───────────────────────── Drawing ─────────────────────────
+plot(showProt and trend == 1 ? protL : na, "Protected low", color.new(color.lime, 20), 2, plot.style_linebr)
+plot(showProt and trend == -1 ? protH : na, "Protected high", color.new(color.red, 20), 2, plot.style_linebr)
+
+var table tbl = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, 25), border_width = 1)
+if barstate.islast and showTbl
+    bool waiting = not na(longS.pend) or not na(shortS.pend)
+    table.cell(tbl, 0, 0, "Trend TF", text_color = color.white, text_size = size.small)
+    table.cell(tbl, 1, 0, trend == 1 ? "UP" : trend == -1 ? "DOWN" : "n/a", text_color = trend == 1 ? color.lime : trend == -1 ? color.red : color.gray, text_size = size.small)
+    table.cell(tbl, 0, 1, "Confirmation", text_color = color.white, text_size = size.small)
+    table.cell(tbl, 1, 1, confirm, text_color = color.white, text_size = size.small)
+    table.cell(tbl, 0, 2, "Waiting for entry candle", text_color = color.white, text_size = size.small)
+    table.cell(tbl, 1, 2, waiting ? "YES" : "no", text_color = waiting ? color.yellow : color.gray, text_size = size.small)
+    table.cell(tbl, 0, 3, "Last signal", text_color = color.white, text_size = size.small)
+    table.cell(tbl, 1, 3, lastSig, text_color = color.yellow, text_size = size.small)

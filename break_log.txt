@@ -1,0 +1,71 @@
+XRPUSDT 2025-10-01 1394
+SOLUSDT 2025-10-01 1394
+BTCUSDT 2025-10-01 1736
+ETHUSDT 2025-10-01 1644
+ETHUSDT 2024-10-01 1486
+BTCUSDT 2024-10-01 1664
+# 1H/5m scalp: which LVNs break? S/D zones and confirmation entries
+
+BTC, ETH, SOL, XRP, 2025-10-19 to 2026-10-19 (2024-25 = BTC, ETH). 5m script LVNs, first touch. Held = 1 x 5m ATR from the near edge
+before a 1m close beyond the far edge; Fixed stop = +1 ATR from the near edge before a 1m close 1 ATR beyond the near edge (same for every zone, so width does not matter). Halves and 2024-25 show the set minus all LVNs.
+
+### All touches
+
+| Set | n | Median width (ATR) | Held 1 ATR % | Fixed 1 ATR stop: held % | Held - all LVNs (95%) | 1st half | 2nd half | 2024-25 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| All script LVNs | 2881 | 0.47 | 38.2 | 50.4 | +0.0 (-2.5 to +2.5) | +0.0 | +0.0 | +0.0 |
+| Own leg S/D zone (base) instead of the LVN | 3287 | 1.21 | 59.9 | 55.6 | +21.7 (+19.3 to +24.1) | +22.7 | +20.8 | +18.9 |
+| Own S/D gap <= 1 ATR | 1623 | 0.45 | 42.4 | 55.6 | +4.2 (+1.2 to +7.2) | +5.1 | +3.3 | +3.2 |
+| Own S/D gap 1-3 ATR | 1012 | 0.48 | 36.3 | 47.8 | -1.9 (-5.4 to +1.5) | -2.7 | -1.1 | -1.7 |
+| Own S/D gap > 3 ATR | 246 | 0.49 | 18.3 | 26.0 | -19.9 (-25.0 to -14.7) | -20.9 | -18.8 | -10.4 |
+| Fresh 1H S/D within 2 ATR beyond | 62 | 0.44 | 38.7 | 50.0 | +0.5 (-11.7 to +12.8) | -2.4 | +5.4 | +19.9 |
+| No fresh 1H S/D within 2 ATR beyond | 2819 | 0.47 | 38.2 | 50.4 | -0.0 (-2.5 to +2.5) | +0.1 | -0.1 | -0.4 |
+| Inside a fresh 1H S/D | 22 | 0.44 | 50.0 | 63.6 | +11.8 (-9.2 to +32.8) | +36.7 | -18.1 | -13.4 |
+| Approach <= 2 ATR in 30 min | 866 | 0.48 | 26.8 | 36.8 | -11.4 (-14.8 to -7.9) | -11.0 | -11.8 | -14.2 |
+| Approach 2-4 ATR in 30 min | 1543 | 0.46 | 41.2 | 54.9 | +3.0 (-0.1 to +6.0) | +4.3 | +1.7 | +4.0 |
+| Approach > 4 ATR in 30 min | 472 | 0.47 | 49.4 | 60.4 | +11.2 (+6.3 to +16.0) | +6.6 | +15.7 | +12.5 |
+| Best: gap <= 1, approach > 2 ATR, age >= 2 h | 492 | 0.46 | 47.8 | 59.3 | +9.6 (+4.8 to +14.3) | +7.9 | +11.3 | +7.0 |
+| Age < 2 h | 1919 | 0.47 | 34.3 | 46.2 | -3.9 (-6.7 to -1.1) | -2.5 | -5.3 | -4.4 |
+| Age 2-12 h | 666 | 0.48 | 44.7 | 57.5 | +6.6 (+2.4 to +10.7) | +2.9 | +10.3 | +6.3 |
+| Age >= 12 h | 296 | 0.45 | 48.6 | 61.1 | +10.5 (+4.5 to +16.4) | +8.8 | +12.3 | +12.6 |
+
+Confirmation entry (instead of a limit at the near edge):
+
+| Entry | Touches | Confirmed % | Held after confirm % | Held per touch % |
+|---|---:|---:|---:|---:|
+| Limit at near edge | 2881 | 100 | 38.2 | 38.2 |
+| 1m close back out | 2881 | 68.0 | 49.2 | 33.5 |
+| 5m close back out | 2881 | 60.7 | 52.6 | 31.9 |
+| S/D zone, limit | 3287 | 100 | 59.9 | 59.9 |
+| S/D zone, 5m close back out | 3287 | 77.5 | 66.9 | 51.8 |
+
+### STRONG 1H + 4H trend on the zone side
+
+| Set | n | Median width (ATR) | Held 1 ATR % | Fixed 1 ATR stop: held % | Held - all LVNs (95%) | 1st half | 2nd half | 2024-25 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| All script LVNs | 467 | 0.47 | 40.5 | 52.2 | +0.0 (-6.3 to +6.3) | +0.0 | +0.0 | +0.0 |
+| Own leg S/D zone (base) instead of the LVN | 526 | 1.07 | 58.0 | 56.3 | +17.5 (+11.4 to +23.6) | +22.8 | +13.0 | +16.3 |
+| Own S/D gap <= 1 ATR | 241 | 0.44 | 44.4 | 55.6 | +3.9 (-3.8 to +11.6) | +3.6 | +4.0 | +2.2 |
+| Own S/D gap 1-3 ATR | 182 | 0.49 | 39.0 | 53.3 | -1.5 (-9.8 to +6.9) | +0.4 | -3.3 | -5.3 |
+| Own S/D gap > 3 ATR | 44 | 0.49 | 25.0 | 29.5 | -15.5 (-29.0 to -1.9) | -15.0 | -15.1 | +4.9 |
+| Fresh 1H S/D within 2 ATR beyond | 13 | 0.45 | 23.1 | 53.8 | -17.4 (-40.7 to +5.9) | -5.8 | -27.5 | +57.4 |
+| No fresh 1H S/D within 2 ATR beyond | 454 | 0.47 | 41.0 | 52.2 | +0.5 (-5.8 to +6.8) | +0.2 | +0.8 | -0.7 |
+| Inside a fresh 1H S/D | 4 | 0.44 | 25.0 | 25.0 | -15.5 (-58.1 to +27.2) | +60.9 | -41.8 | +57.4 |
+| Approach <= 2 ATR in 30 min | 124 | 0.48 | 33.1 | 43.5 | -7.4 (-16.8 to +2.0) | -13.3 | -1.4 | -10.6 |
+| Approach 2-4 ATR in 30 min | 249 | 0.46 | 39.8 | 51.8 | -0.7 (-8.2 to +6.8) | +6.2 | -7.9 | -1.7 |
+| Approach > 4 ATR in 30 min | 94 | 0.48 | 52.1 | 64.9 | +11.7 (+0.6 to +22.7) | +0.9 | +19.3 | +20.1 |
+| Best: gap <= 1, approach > 2 ATR, age >= 2 h | 78 | 0.44 | 48.7 | 57.7 | +8.2 (-3.7 to +20.2) | -4.6 | +15.4 | +8.6 |
+| Age < 2 h | 292 | 0.46 | 36.0 | 48.6 | -4.5 (-11.6 to +2.6) | -0.7 | -8.4 | -7.4 |
+| Age 2-12 h | 145 | 0.47 | 46.9 | 57.9 | +6.4 (-2.8 to +15.7) | +1.2 | +10.8 | +8.8 |
+| Age >= 12 h | 30 | 0.46 | 53.3 | 60.0 | +12.9 (-5.5 to +31.3) | +2.5 | +19.3 | +20.3 |
+
+Confirmation entry (instead of a limit at the near edge):
+
+| Entry | Touches | Confirmed % | Held after confirm % | Held per touch % |
+|---|---:|---:|---:|---:|
+| Limit at near edge | 467 | 100 | 40.5 | 40.5 |
+| 1m close back out | 467 | 71.3 | 52.0 | 37.0 |
+| 5m close back out | 467 | 63.4 | 55.7 | 35.3 |
+| S/D zone, limit | 526 | 100 | 58.0 | 58.0 |
+| S/D zone, 5m close back out | 526 | 76.8 | 64.6 | 49.6 |
+

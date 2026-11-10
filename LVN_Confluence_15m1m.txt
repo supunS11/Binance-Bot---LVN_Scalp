@@ -1,0 +1,890 @@
+//@version=5
+// Nested LVN Zones
+// 1H = context, 15m = bias + main zones, 1m (chart) = entry. All three use the same impulse legs ->
+// per-leg volume profile (1m intrabars) -> LVN between two HVNs.
+// A 1m LVN overlapping a same-direction 15m LVN = NESTED; A+ if that 15m LVN was fresh when they nested,
+// the 1m LVN is fresh, it agrees with 15m bias and the 1H context does not block it.
+// Each zone is scored 0-3 on its own leg: FIB (0.5-0.786 retracement), FVG (3-candle gap), OB (last opposite candle before displacement).
+// Entry signal: first touch of an eligible FRESH zone, then a close back outside it on the trade side.
+// Higher-TF data is taken from closed bars only (no repaint).
+indicator("LVN Confluence 15m1m", shorttitle = "LVN Conf 1m", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ───────────────────────── Inputs ─────────────────────────
+string GT = "Timeframes"
+ctxRes   = input.timeframe("60", "Context TF (strong levels + LVNs)", group = GT)
+htfRes   = input.timeframe("15", "HTF (bias + main zones)", group = GT)
+ltfRes   = input.timeframe("1", "Intrabar TF for volume profile", group = GT)
+useLtf   = input.bool(true, "Use intrabar volume", group = GT, tooltip = "Off / no intrabar data -> profile is built from chart bars (less accurate).")
+
+string GX = "1H context"
+ctxFilt  = input.bool(true, "Block setups against 1H context", group = GX)
+minRoom  = input.float(2.0, "Min room to 1H strong high / low (x HTF ATR)", step = 0.5, group = GX, tooltip = "Blocks a long this close under a strong high, or a short this close above a strong low. Strong level = origin of a valid 1H impulse leg, until a 1H close beyond it.")
+showCtx  = input.bool(true, "Show 1H LVN zones", group = GX)
+showStrong = input.bool(true, "Show 1H strong high / low", group = GX)
+
+string GI = "Impulse leg rules"
+reqBos   = input.bool(true, "Require BOS", group = GI)
+pivLen   = input.int(3, "Swing pivot length (for BOS / bias)", minval = 1, group = GI)
+minAtr   = input.float(4.0, "Min leg size (x ATR)", step = 0.1, group = GI)
+minBars  = input.int(2, "Min candles", minval = 1, group = GI)
+maxBars  = input.int(10, "Max candles", minval = 2, maxval = 50, group = GI)
+minEff   = input.float(0.30, "Min efficiency", step = 0.01, group = GI, tooltip = "Net move (open of first candle -> close of last) / sum of candle ranges.")
+minVol   = input.float(1.5, "Min volume (x average) - chart TF", step = 0.1, group = GI)
+minVolH  = input.float(1.1, "Min volume (x average) - HTF", step = 0.1, group = GI)
+minDir   = input.float(0.70, "Min share of candles in leg direction", step = 0.05, group = GI)
+pbPct    = input.float(0.30, "Pullback that finalizes a leg", step = 0.05, group = GI)
+atrLen   = input.int(14, "ATR length", group = GI)
+volLen   = input.int(20, "Volume average length", group = GI)
+
+string GP = "LVN / volume profile"
+rows     = input.int(150, "Profile rows", minval = 10, maxval = 300, group = GP)
+peakW    = input.int(2, "HVN peak window (rows each side)", minval = 1, group = GP)
+maxLvn   = input.int(5, "Max LVNs per leg (deepest first)", minval = 1, maxval = 10, group = GP)
+edgePct  = input.float(0.10, "Ignore top / bottom of leg", step = 0.05, group = GP)
+maxRatio = input.float(0.75, "Max LVN / HVN volume ratio", step = 0.05, group = GP)
+bufCap   = input.int(30000, "Intrabar buffer size", minval = 5000, maxval = 90000, group = GP)
+
+string GZ = "Zone status"
+weakN    = input.int(9, "HTF zone WEAK after N chart closes inside", minval = 1, group = GZ)
+fillN    = input.int(18, "FILLED after N chart closes inside", minval = 1, group = GZ)
+brokeN   = input.int(6, "BROKEN after N consecutive chart closes beyond", minval = 1, group = GZ)
+htfBreak = input.bool(true, "BROKEN on 1 HTF close beyond", group = GZ)
+
+string GF = "Confluence + entry signal"
+useFib   = input.bool(true, "Score Fib", group = GF)
+fibA     = input.float(0.50, "Fib zone start", step = 0.01, group = GF)
+fibB     = input.float(0.786, "Fib zone end", step = 0.01, group = GF)
+useFvg   = input.bool(true, "Score FVG", group = GF)
+useOb    = input.bool(true, "Score order block", group = GF)
+obLook   = input.int(3, "OB: candles allowed for displacement", minval = 1, maxval = 10, group = GF)
+minScore = input.int(1, "Min score for chart zones + signals", minval = 0, maxval = 3, group = GF)
+showSig  = input.bool(true, "Show entry signals", group = GF)
+reqNest  = input.bool(true, "Chart-TF signals need a fresh HTF parent", group = GF)
+sigWin   = input.int(6, "Candles allowed for the close back outside", minval = 1, maxval = 30, group = GF)
+slAtr    = input.float(1.0, "Stop beyond far edge (x HTF ATR)", step = 0.1, group = GF)
+tpR      = input.float(2.0, "Target (R)", step = 0.5, group = GF)
+
+string GD = "Display"
+showHtf  = input.bool(true, "Show HTF zones", group = GD)
+showLtf  = input.bool(true, "Show chart-TF zones", group = GD)
+onlyAplus = input.bool(true, "Chart-TF: show only A+ setups", group = GD)
+onlyNest = input.bool(false, "Chart-TF: show only NESTED zones", group = GD)
+onlyFresh = input.bool(true, "Show only FRESH zones", group = GD)
+biasFilt = input.bool(true, "Only zones with HTF bias", group = GD)
+showCtr  = input.bool(false, "Show counter-bias zones (blue)", group = GD)
+keepDead = input.bool(false, "Keep dead zones (grey)", group = GD)
+showLegs = input.bool(false, "Show detected legs", group = GD)
+rangeN   = input.int(120, "Bias = RANGE after N HTF bars without a break", minval = 5, group = GD)
+maxZones = input.int(240, "Max zones kept", minval = 20, maxval = 240, group = GD)
+showTbl  = input.bool(true, "Show info table", group = GD)
+dbg      = input.bool(false, "Debug: show rejected legs + reason", group = GD)
+dbgMin   = input.float(2.0, "Debug: only rejected legs ≥ N x ATR", step = 0.5, group = GD)
+
+string GC = "Colors"
+cBull    = input.color(color.new(color.green, 75), "Fresh demand", group = GC)
+cBear    = input.color(color.new(color.red, 75), "Fresh supply", group = GC)
+cTest    = input.color(color.new(color.orange, 75), "Tested", group = GC)
+cWeak    = input.color(color.new(color.purple, 70), "Weak (HTF)", group = GC)
+cCtxZ    = input.color(color.new(color.teal, 85), "1H context zone", group = GC)
+cDead    = input.color(color.new(color.gray, 85), "Dead", group = GC)
+cCtr     = input.color(color.new(color.blue, 80), "Counter-bias", group = GC)
+
+// ───────────────────────── Types ─────────────────────────
+type Cfg
+    int   pivLen
+    bool  reqBos
+    float minAtr
+    int   minBars
+    int   maxBars
+    float minEff
+    float minVol
+    float minDir
+    float pb
+
+type Leg
+    int   dir
+    int   tStart
+    int   tEnd
+    float lo
+    float hi
+    int   bars
+    float sizeAtr
+    float eff
+    float volX
+    float dirPct
+    string fail
+    int   iS
+    int   iE
+
+// Bar history + swing structure + leg trackers for one timeframe.
+type Engine
+    array<float> o
+    array<float> h
+    array<float> l
+    array<float> c
+    array<float> v
+    array<int>   t
+    array<int>   tc
+    array<float> atr
+    array<float> va
+    array<float> phL
+    array<int>   phI
+    array<float> plL
+    array<int>   plI
+    int   base     = 0
+    int   n        = 0
+    float lastSH   = na
+    bool  shBroken = true
+    float lastSL   = na
+    bool  slBroken = true
+    int   trend    = 0
+    bool  choch    = false
+    int   lastBrk  = 0
+    bool  bOn      = false
+    int   bO       = 0
+    int   bE       = 0
+    float bLo      = na
+    float bHi      = na
+    bool  sOn      = false
+    int   sO       = 0
+    int   sE       = 0
+    float sHi      = na
+    float sLo      = na
+
+// status: 0 FRESH, 1 TESTED, 2 WEAK, 3 FILLED, 4 BROKEN, 5 LEG INVALID (>= 3 = dead)
+type Zone
+    float top
+    float bot
+    int   dir
+    bool  htf
+    float origin
+    int   tLeft
+    int   tCreate
+    int   status  = 0
+    int   touches = 0
+    int   inside  = 0
+    int   beyond  = 0
+    bool  nested  = false
+    bool  ctx     = false
+    bool  parentFresh = false
+    bool  fib     = false
+    bool  fvg     = false
+    bool  ob      = false
+    int   score   = 0
+    int   armLeft = 0
+    int   tDead   = 0
+    box   bx
+
+// ───────────────────────── Globals ─────────────────────────
+var array<int>   bT = array.new_int()
+var array<float> bH = array.new_float()
+var array<float> bL = array.new_float()
+var array<float> bV = array.new_float()
+var array<Zone>  zones = array.new<Zone>()
+var int    biasDir = 0
+var string biasTxt = "RANGE"
+var float  strongH = na
+var float  strongL = na
+var float  roomAtr = na
+
+f_tfLabel(string res) =>
+    int s = timeframe.in_seconds(res)
+    s >= 86400 ? str.tostring(math.round(s / 86400)) + "D" : s >= 3600 ? str.tostring(math.round(s / 3600)) + "H" : str.tostring(math.round(s / 60)) + "m"
+
+string htfLbl   = f_tfLabel(htfRes)
+string chartLbl = f_tfLabel(timeframe.period)
+string ltfLbl   = f_tfLabel(ltfRes)
+string ctxLbl   = f_tfLabel(ctxRes)
+
+if timeframe.in_seconds(timeframe.period) >= timeframe.in_seconds(htfRes) or timeframe.in_seconds(htfRes) >= timeframe.in_seconds(ctxRes)
+    runtime.error("Timeframes must go chart < HTF < Context, e.g. 1m chart, 15m, 1H.")
+
+// ───────────────────────── Engine ─────────────────────────
+newEngine() =>
+    Engine.new(array.new_float(), array.new_float(), array.new_float(), array.new_float(), array.new_float(), array.new_int(), array.new_int(), array.new_float(), array.new_float(), array.new_float(), array.new_int(), array.new_float(), array.new_int())
+
+method fa(Engine e, array<float> a, int i) =>
+    a.get(i - e.base)
+
+method ia(Engine e, array<int> a, int i) =>
+    a.get(i - e.base)
+
+// Runs the six impulse checks on bars s..en. leg.fail = "" when all pass, else the failed checks.
+method validate(Engine e, int dir, int s, int en, float lo, float hi, Cfg cfg) =>
+    Leg res = na
+    int bars = en - s + 1
+    if s - 1 >= e.base and bars >= 2
+        float atrRef = e.fa(e.atr, s - 1)
+        float vaRef  = e.fa(e.va, s - 1)
+        float path = 0.0
+        float vSum = 0.0
+        int   nDir = 0
+        for k = s to en
+            float ok = e.fa(e.o, k)
+            float ck = e.fa(e.c, k)
+            path += e.fa(e.h, k) - e.fa(e.l, k)
+            vSum += nz(e.fa(e.v, k))
+            if (dir == 1 and ck > ok) or (dir == -1 and ck < ok)
+                nDir += 1
+        float net    = dir == 1 ? e.fa(e.c, en) - e.fa(e.o, s) : e.fa(e.o, s) - e.fa(e.c, en)
+        float eff    = path > 0 ? net / path : 0.0
+        float sizeX  = atrRef > 0 ? (hi - lo) / atrRef : 0.0
+        float volX   = vaRef > 0 ? (vSum / bars) / vaRef : 0.0
+        // the origin / extreme candle may close against the leg (wick reversal): not counted
+        bool  firstCtr = dir == 1 ? e.fa(e.c, s) <= e.fa(e.o, s) : e.fa(e.c, s) >= e.fa(e.o, s)
+        bool  lastCtr  = dir == 1 ? e.fa(e.c, en) <= e.fa(e.o, en) : e.fa(e.c, en) >= e.fa(e.o, en)
+        int   nDen     = bars - (firstCtr ? 1 : 0) - (lastCtr ? 1 : 0)
+        float dirPct   = float(nDir) / math.max(nDen, 1)
+        bool  bos    = not cfg.reqBos
+        if cfg.reqBos
+            array<float> lv = dir == 1 ? e.phL : e.plL
+            array<int>   ix = dir == 1 ? e.phI : e.plI
+            int np = ix.size()
+            if np > 0
+                for k = np - 1 to 0
+                    if ix.get(k) < s
+                        float lvl = lv.get(k)
+                        bos := dir == 1 ? hi > lvl : lo < lvl
+                        break
+        string fail = ""
+        if bars < cfg.minBars or bars > cfg.maxBars
+            fail += " bars"
+        if not bos
+            fail += " BOS"
+        if not (sizeX >= cfg.minAtr)
+            fail += " size"
+        if not (eff >= cfg.minEff)
+            fail += " eff"
+        if not (volX >= cfg.minVol)
+            fail += " vol"
+        if not (dirPct >= cfg.minDir)
+            fail += " dir"
+        res := Leg.new(dir, e.ia(e.t, s), e.ia(e.tc, en), lo, hi, bars, sizeX, eff, volX, dirPct, fail, s, en)
+    res
+
+// Feeds one closed bar. Returns candidate legs finalized on this bar (after the pullback), passed or not.
+method feed(Engine e, float o, float h, float l, float c, float v, int t, int tc, float atr, float va, Cfg cfg) =>
+    array<Leg> out = array.new<Leg>()
+    e.o.push(o)
+    e.h.push(h)
+    e.l.push(l)
+    e.c.push(c)
+    e.v.push(v)
+    e.t.push(t)
+    e.tc.push(tc)
+    e.atr.push(atr)
+    e.va.push(va)
+    e.n := e.n + 1
+    int i = e.n - 1
+    if e.o.size() > 800
+        e.o.shift()
+        e.h.shift()
+        e.l.shift()
+        e.c.shift()
+        e.v.shift()
+        e.t.shift()
+        e.tc.shift()
+        e.atr.shift()
+        e.va.shift()
+        e.base := e.base + 1
+
+    // swing pivots (confirmed pivLen bars later)
+    int L = cfg.pivLen
+    int p = i - L
+    if p - L >= e.base
+        float ph = e.fa(e.h, p)
+        float pl = e.fa(e.l, p)
+        bool isH = true
+        bool isL = true
+        for k = p - L to p + L
+            if k != p
+                if e.fa(e.h, k) >= ph
+                    isH := false
+                if e.fa(e.l, k) <= pl
+                    isL := false
+        if isH
+            e.phL.push(ph)
+            e.phI.push(p)
+            e.lastSH   := ph
+            e.shBroken := false
+        if isL
+            e.plL.push(pl)
+            e.plI.push(p)
+            e.lastSL   := pl
+            e.slBroken := false
+        if e.phL.size() > 60
+            e.phL.shift()
+            e.phI.shift()
+        if e.plL.size() > 60
+            e.plL.shift()
+            e.plI.shift()
+
+    // structure breaks -> bias (close-based)
+    if not e.shBroken and c > e.lastSH
+        e.shBroken := true
+        e.choch    := e.trend == -1
+        e.trend    := 1
+        e.lastBrk  := i
+    if not e.slBroken and c < e.lastSL
+        e.slBroken := true
+        e.choch    := e.trend == 1
+        e.trend    := -1
+        e.lastBrk  := i
+
+    // bull tracker: origin low -> extreme high, finalized on pullback
+    if not e.bOn
+        e.bOn := true
+        e.bO  := i
+        e.bLo := l
+        e.bE  := i
+        e.bHi := h
+    else
+        float rng = e.bHi - e.bLo
+        // a bar that makes a new high extends the leg, even if its wick dips (pullback only after the extreme)
+        if h <= e.bHi and e.bE > e.bO and rng > 0 and e.bHi - l >= cfg.pb * rng
+            Leg lg = e.validate(1, e.bO, e.bE, e.bLo, e.bHi, cfg)
+            if not na(lg)
+                out.push(lg)
+            e.bO  := i
+            e.bLo := l
+            e.bE  := i
+            e.bHi := h
+        else if l < e.bLo
+            e.bO  := i
+            e.bLo := l
+            e.bE  := i
+            e.bHi := h
+        else if h > e.bHi
+            e.bHi := h
+            e.bE  := i
+            if e.bE - e.bO + 1 > cfg.maxBars
+                int s0 = e.bE - cfg.maxBars + 1
+                float mn = e.fa(e.l, s0)
+                int mi = s0
+                for k = s0 + 1 to e.bE
+                    if e.fa(e.l, k) < mn
+                        mn := e.fa(e.l, k)
+                        mi := k
+                e.bO  := mi
+                e.bLo := mn
+
+    // bear tracker: origin high -> extreme low
+    if not e.sOn
+        e.sOn := true
+        e.sO  := i
+        e.sHi := h
+        e.sE  := i
+        e.sLo := l
+    else
+        float rng = e.sHi - e.sLo
+        if l >= e.sLo and e.sE > e.sO and rng > 0 and h - e.sLo >= cfg.pb * rng
+            Leg lg = e.validate(-1, e.sO, e.sE, e.sLo, e.sHi, cfg)
+            if not na(lg)
+                out.push(lg)
+            e.sO  := i
+            e.sHi := h
+            e.sE  := i
+            e.sLo := l
+        else if h > e.sHi
+            e.sO  := i
+            e.sHi := h
+            e.sE  := i
+            e.sLo := l
+        else if l < e.sLo
+            e.sLo := l
+            e.sE  := i
+            if e.sE - e.sO + 1 > cfg.maxBars
+                int s0 = e.sE - cfg.maxBars + 1
+                float mx = e.fa(e.h, s0)
+                int mi = s0
+                for k = s0 + 1 to e.sE
+                    if e.fa(e.h, k) > mx
+                        mx := e.fa(e.h, k)
+                        mi := k
+                e.sO  := mi
+                e.sHi := mx
+    out
+
+// ───────────────────────── Volume profile / LVN ─────────────────────────
+// Profile of [t0, t1) between lo..hi from the intrabar buffer. Returns [top, bot, top, bot, ...] for the
+// deepest LVNs that sit between two HVNs inside the inner (1 - 2*edgePct) of the leg.
+f_lvn(int t0, int t1, float lo, float hi) =>
+    array<float> res = array.new_float()
+    float step = (hi - lo) / rows
+    int sz = bT.size()
+    if step > 0 and sz > 0
+        array<float> prof = array.new_float(rows, 0.0)
+        int k = math.max(0, bT.binary_search_leftmost(t0))
+        while k < sz
+            int tk = bT.get(k)
+            if tk >= t1
+                break
+            if tk >= t0
+                float bh = math.min(bH.get(k), hi)
+                float bl = math.max(bL.get(k), lo)
+                float vv = bV.get(k)
+                if bh >= bl and vv > 0
+                    int r0 = math.max(0, math.min(rows - 1, math.floor((bl - lo) / step)))
+                    int r1 = math.max(0, math.min(rows - 1, math.floor((bh - lo) / step)))
+                    float share = vv / (r1 - r0 + 1)
+                    for r = r0 to r1
+                        prof.set(r, prof.get(r) + share)
+            k += 1
+
+        // 3-row smoothing
+        array<float> sm = array.new_float(rows, 0.0)
+        for r = 0 to rows - 1
+            float sv = prof.get(r)
+            int cnt = 1
+            if r > 0
+                sv += prof.get(r - 1)
+                cnt += 1
+            if r < rows - 1
+                sv += prof.get(r + 1)
+                cnt += 1
+            sm.set(r, sv / cnt)
+
+        // HVNs = highest row within +-peakW rows
+        array<int> pk = array.new_int()
+        for r = 0 to rows - 1
+            float cur = sm.get(r)
+            bool isPk = cur > 0
+            for q = math.max(0, r - peakW) to math.min(rows - 1, r + peakW)
+                if (q < r and sm.get(q) > cur) or (q > r and sm.get(q) >= cur)
+                    isPk := false
+            if isPk
+                pk.push(r)
+
+        // valley between each two adjacent HVNs, inside the inner zone
+        int rIn0 = math.ceil(rows * edgePct)
+        int rIn1 = rows - 1 - rIn0
+        array<float> cR = array.new_float()
+        array<float> cT = array.new_float()
+        array<float> cB = array.new_float()
+        if pk.size() >= 2
+            for j = 0 to pk.size() - 2
+                int p1 = pk.get(j)
+                int p2 = pk.get(j + 1)
+                if p2 - p1 >= 2
+                    int m = p1 + 1
+                    for r = p1 + 1 to p2 - 1
+                        if sm.get(r) < sm.get(m)
+                            m := r
+                    float refV  = math.min(sm.get(p1), sm.get(p2))
+                    float ratio = refV > 0 ? sm.get(m) / refV : 1.0
+                    if m >= rIn0 and m <= rIn1 and ratio <= maxRatio
+                        // widen the zone over neighbouring low-volume rows
+                        float vMin = sm.get(m)
+                        float lim  = vMin + 0.30 * (refV - vMin)
+                        int z0 = m
+                        int z1 = m
+                        while z0 - 1 > p1 and z0 - 1 >= rIn0 and sm.get(z0 - 1) <= lim
+                            z0 -= 1
+                        while z1 + 1 < p2 and z1 + 1 <= rIn1 and sm.get(z1 + 1) <= lim
+                            z1 += 1
+                        cR.push(ratio)
+                        cT.push(lo + (z1 + 1) * step)
+                        cB.push(lo + z0 * step)
+
+        // keep the deepest maxLvn
+        while cR.size() > maxLvn
+            int ix = cR.indexof(cR.max())
+            cR.remove(ix)
+            cT.remove(ix)
+            cB.remove(ix)
+        if cR.size() > 0
+            for j = 0 to cR.size() - 1
+                res.push(cT.get(j))
+                res.push(cB.get(j))
+    res
+
+// ───────────────────────── Zones ─────────────────────────
+f_stName(int s) =>
+    s == 0 ? "FRESH" : s == 1 ? "TESTED" : s == 2 ? "WEAK" : s == 3 ? "FILLED" : s == 4 ? "BROKEN" : "LEG INVALID"
+
+f_aligned(Zone z) =>
+    z.ctx or not biasFilt or biasDir == 0 or z.dir == biasDir
+
+f_tierLbl(Zone z) =>
+    z.ctx ? ctxLbl : z.htf ? htfLbl : chartLbl
+
+// Why the 1H context blocks this zone ("" = not blocked)
+f_block(Zone z) =>
+    string why = ""
+    if ctxFilt and not z.ctx
+        float entry = z.dir == 1 ? z.top : z.bot
+        if z.dir == 1 and not na(strongH) and not na(roomAtr) and strongH > entry and strongH - entry < minRoom * roomAtr
+            why := ctxLbl + " strong high"
+        else if z.dir == -1 and not na(strongL) and not na(roomAtr) and strongL < entry and entry - strongL < minRoom * roomAtr
+            why := ctxLbl + " strong low"
+        else
+            for oz in zones
+                if oz.ctx and oz.status == 0 and oz.dir != z.dir and z.top >= oz.bot and z.bot <= oz.top
+                    why := "inside " + ctxLbl + " LVN"
+                    break
+    why
+
+f_aPlus(Zone z) =>
+    bool res = false
+    if not z.htf and not z.ctx and z.status == 0 and z.parentFresh and (biasDir == 0 or z.dir == biasDir) and f_block(z) == ""
+        for oz in zones
+            if oz.htf and oz.status < 3 and oz.dir == z.dir and z.top >= oz.bot and z.bot <= oz.top
+                res := true
+                break
+    res
+
+f_tags(Zone z) =>
+    string t = (z.fib ? " FIB" : "") + (z.fvg ? " FVG" : "") + (z.ob ? " OB" : "")
+    str.tostring(z.score) + "/3" + t
+
+// Can the first touch of this zone give an entry signal?
+f_eligible(Zone z) =>
+    bool ok = not z.ctx and z.status == 0 and z.score >= minScore and (biasDir == 0 or z.dir == biasDir) and f_block(z) == ""
+    if ok and not z.htf and reqNest
+        ok := f_aPlus(z)
+    ok
+
+f_vis(Zone z) =>
+    bool dead = z.status >= 3
+    bool chartTf = not z.htf and not z.ctx
+    (not onlyFresh or z.status == 0) and (not dead or keepDead) and (f_aligned(z) or showCtr) and (z.ctx ? showCtx : z.htf ? showHtf : showLtf) and (z.ctx or z.score >= minScore) and (not chartTf or not onlyNest or z.nested) and (not chartTf or not onlyAplus or f_aPlus(z))
+
+f_draw(Zone z) =>
+    bool dead = z.status >= 3
+    color bg = dead ? cDead : not f_aligned(z) ? cCtr : z.ctx ? cCtxZ : z.status == 0 ? (z.dir == 1 ? cBull : cBear) : z.status == 1 ? cTest : cWeak
+    z.bx.set_right(dead ? z.tDead : time)
+    if f_vis(z)
+        bool ap = f_aPlus(z)
+        string why = dead or z.ctx ? "" : f_block(z)
+        z.bx.set_bgcolor(bg)
+        z.bx.set_border_color(color.new(bg, 20))
+        z.bx.set_border_width(ap ? 3 : z.nested or z.htf ? 2 : 1)
+        z.bx.set_text(f_tierLbl(z) + " LVN" + (ap ? " • A+" : z.nested ? " • NESTED" : "") + " • " + f_stName(z.status) + (z.ctx ? "" : " • " + f_tags(z)) + (why == "" ? "" : " • ✗ " + why))
+    else
+        z.bx.set_bgcolor(color.new(color.black, 100))
+        z.bx.set_border_color(color.new(color.black, 100))
+        z.bx.set_text("")
+    true
+
+// Did price come back to the zone after the impulse first left it fully behind (inside the leg or after it)?
+f_seen(int t0, int dir, float top, float bot) =>
+    bool seen = false
+    bool away = false
+    int sz = bT.size()
+    if sz > 0
+        int k = math.max(0, bT.binary_search_leftmost(t0))
+        while k < sz and not seen
+            if bT.get(k) >= t0
+                if away
+                    seen := dir == 1 ? bL.get(k) <= top : bH.get(k) >= bot
+                else
+                    away := dir == 1 ? bL.get(k) > top : bH.get(k) < bot
+            k += 1
+    seen
+
+// Zone overlaps the leg's fib retracement band
+f_fib(Leg lg, float top, float bot) =>
+    float rng  = lg.hi - lg.lo
+    float a    = lg.dir == 1 ? lg.hi - fibA * rng : lg.lo + fibA * rng
+    float b    = lg.dir == 1 ? lg.hi - fibB * rng : lg.lo + fibB * rng
+    top >= math.min(a, b) and bot <= math.max(a, b)
+
+// Zone overlaps a 3-candle gap inside the leg
+f_fvg(Engine e, Leg lg, float top, float bot) =>
+    bool hit = false
+    if lg.iE - lg.iS >= 2
+        for k = lg.iS + 1 to lg.iE - 1
+            float gB = lg.dir == 1 ? e.fa(e.h, k - 1) : e.fa(e.h, k + 1)
+            float gT = lg.dir == 1 ? e.fa(e.l, k + 1) : e.fa(e.l, k - 1)
+            if gT > gB and top >= gB and bot <= gT
+                hit := true
+                break
+    hit
+
+// Zone overlaps an opposite candle (from the one before the leg to the leg's end) that price then closed beyond
+f_ob(Engine e, Leg lg, float top, float bot) =>
+    bool hit = false
+    for k = lg.iS - 1 to lg.iE - 1
+        bool opp = lg.dir == 1 ? e.fa(e.c, k) < e.fa(e.o, k) : e.fa(e.c, k) > e.fa(e.o, k)
+        if opp and top >= e.fa(e.l, k) and bot <= e.fa(e.h, k)
+            for q = k + 1 to math.min(k + obLook, lg.iE)
+                if lg.dir == 1 ? e.fa(e.c, q) > e.fa(e.h, k) : e.fa(e.c, q) < e.fa(e.l, k)
+                    hit := true
+                    break
+        if hit
+            break
+    hit
+
+f_trim() =>
+    while zones.size() > maxZones
+        int di = 0
+        int firstChart = -1
+        bool foundDead = false
+        for k = 0 to zones.size() - 1
+            Zone c = zones.get(k)
+            if c.status >= 3
+                di := k
+                foundDead := true
+                break
+            if firstChart < 0 and not c.htf and not c.ctx
+                firstChart := k
+        if not foundDead and firstChart >= 0
+            di := firstChart
+        Zone z = zones.remove(di)
+        z.bx.delete()
+    zones.size()
+
+f_stats(Leg lg) =>
+    str.tostring(lg.sizeAtr, "#.0") + "×ATR  eff " + str.tostring(lg.eff, "#.00") + "  vol " + str.tostring(lg.volX, "#.0") + "×  " + str.tostring(lg.dirPct * 100, "#") + "%"
+
+// Builds the LVN zone for a finalized leg (+ optional leg line). Returns true if a zone was made.
+// tier: 2 = context, 1 = HTF, 0 = chart
+f_leg(Engine e, Leg lg, int tier) =>
+    bool isHtf = tier == 1
+    string lTf = tier == 2 ? ctxLbl : tier == 1 ? htfLbl : chartLbl
+    array<float> zs = f_lvn(lg.tStart, lg.tEnd, lg.lo, lg.hi)
+    int nZ = math.round(zs.size() / 2)
+    bool made = nZ > 0
+    if made
+        for i = 0 to nZ - 1
+            float zt = zs.get(i * 2)
+            float zb = zs.get(i * 2 + 1)
+            Zone z = Zone.new(top = zt, bot = zb, dir = lg.dir, htf = isHtf, ctx = tier == 2, origin = lg.dir == 1 ? lg.lo : lg.hi, tLeft = lg.tStart, tCreate = time)
+            if f_seen(lg.tStart, lg.dir, zt, zb)
+                z.status := 1
+            z.fib := useFib and f_fib(lg, zt, zb)
+            z.fvg := useFvg and f_fvg(e, lg, zt, zb)
+            z.ob  := useOb and f_ob(e, lg, zt, zb)
+            z.score := (z.fib ? 1 : 0) + (z.fvg ? 1 : 0) + (z.ob ? 1 : 0)
+            z.bx := box.new(left = lg.tStart, top = zt, right = time, bottom = zb, xloc = xloc.bar_time, border_color = color.new(color.black, 100), bgcolor = color.new(color.black, 100), text = "", text_size = size.tiny, text_color = chart.fg_color, text_halign = text.align_right, text_valign = text.align_top)
+            for oz in zones
+                if tier < 2 and not oz.ctx and oz.status < 3 and oz.htf != isHtf and oz.dir == z.dir and z.top >= oz.bot and z.bot <= oz.top
+                    if isHtf
+                        oz.nested := true
+                        oz.parentFresh := oz.parentFresh or z.status == 0
+                    else
+                        z.nested := true
+                        z.parentFresh := z.parentFresh or oz.status == 0
+            zones.push(z)
+        f_trim()
+    if showLegs
+        color lc = lg.dir == 1 ? color.teal : color.maroon
+        line.new(lg.tStart, lg.dir == 1 ? lg.lo : lg.hi, lg.tEnd, lg.dir == 1 ? lg.hi : lg.lo, xloc = xloc.bar_time, color = lc, width = tier > 0 ? 2 : 1, style = tier > 0 ? line.style_solid : line.style_dotted)
+        if tier > 0
+            string txt = lTf + " leg  " + f_stats(lg) + (made ? "" : "  (no LVN)")
+            label.new(lg.tEnd, lg.dir == 1 ? lg.hi : lg.lo, txt, xloc = xloc.bar_time, style = lg.dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(lc, 30), textcolor = color.white, size = size.tiny)
+    made
+
+// Debug: grey line + which checks failed
+f_reject(Leg lg, int tier) =>
+    if dbg and lg.sizeAtr >= dbgMin
+        string tf = tier == 2 ? ctxLbl : tier == 1 ? htfLbl : chartLbl
+        line.new(lg.tStart, lg.dir == 1 ? lg.lo : lg.hi, lg.tEnd, lg.dir == 1 ? lg.hi : lg.lo, xloc = xloc.bar_time, color = color.gray, width = tier > 0 ? 2 : 1, style = line.style_dashed)
+        label.new(lg.tEnd, lg.dir == 1 ? lg.hi : lg.lo, "✗ " + tf + ":" + lg.fail + "\n" + str.tostring(lg.bars) + " bars  " + f_stats(lg), xloc = xloc.bar_time, style = lg.dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.gray, 30), textcolor = color.white, size = size.tiny)
+    true
+
+// ───────────────────────── Data ─────────────────────────
+float cAtr = ta.atr(atrLen)
+float cVa  = ta.sma(volume, volLen)
+
+// [1] + lookahead_on = values of the last CLOSED HTF bar -> no repaint
+[hO, hH, hL, hC, hV, hT, hTC, hATR, hVA] = request.security(syminfo.tickerid, htfRes, [open[1], high[1], low[1], close[1], volume[1], time[1], time_close[1], ta.atr(atrLen)[1], ta.sma(volume, volLen)[1]], lookahead = barmerge.lookahead_on)
+[xO, xH, xL, xC, xV, xT, xTC, xATR, xVA] = request.security(syminfo.tickerid, ctxRes, [open[1], high[1], low[1], close[1], volume[1], time[1], time_close[1], ta.atr(atrLen)[1], ta.sma(volume, volLen)[1]], lookahead = barmerge.lookahead_on)
+[lT, lH, lL, lV] = request.security_lower_tf(syminfo.tickerid, ltfRes, [time, high, low, volume])
+
+int  htfChg = ta.change(hT)
+bool htfNew = not na(hT) and not na(htfChg) and htfChg != 0
+int  ctxChg = ta.change(xT)
+bool ctxNew = not na(xT) and not na(ctxChg) and ctxChg != 0
+
+var Cfg    cfg  = Cfg.new(pivLen, reqBos, minAtr, minBars, maxBars, minEff, minVol, minDir, pbPct)
+var Cfg    cfgH = Cfg.new(pivLen, reqBos, minAtr, minBars, maxBars, minEff, minVolH, minDir, pbPct)
+var Engine htfE = newEngine()
+var Engine ltfE = newEngine()
+var Engine ctxE = newEngine()
+var bool   ltfOk = false
+var int    nHtfLegs = 0
+var int    nLtfLegs = 0
+var int    nHtfZones = 0
+var int    nLtfZones = 0
+
+// ───────────────────────── Main (closed bars only) ─────────────────────────
+if barstate.isconfirmed
+    // 1) intrabar buffer for the profiles
+    int nl = lT.size()
+    if useLtf and nl > 0
+        for k = 0 to nl - 1
+            bT.push(lT.get(k))
+            bH.push(lH.get(k))
+            bL.push(lL.get(k))
+            bV.push(nz(lV.get(k)))
+        ltfOk := true
+    else
+        bT.push(time)
+        bH.push(high)
+        bL.push(low)
+        bV.push(nz(volume))
+        ltfOk := false
+    if bT.size() > bufCap + 3000
+        int cut = bT.size() - bufCap
+        bT := bT.slice(cut, bT.size()).copy()
+        bH := bH.slice(cut, bH.size()).copy()
+        bL := bL.slice(cut, bL.size()).copy()
+        bV := bV.slice(cut, bV.size()).copy()
+
+    // 2) Context TF: strong levels, zone breaks, legs
+    if ctxNew
+        if not na(strongH) and xC > strongH
+            strongH := na
+        if not na(strongL) and xC < strongL
+            strongL := na
+        for z in zones
+            if z.ctx and z.status < 3 and xTC > z.tCreate and (z.dir == 1 ? xC < z.bot : xC > z.top)
+                z.status := 4
+                z.tDead  := time
+        array<Leg> xl = ctxE.feed(xO, xH, xL, xC, xV, xT, xTC, xATR, xVA, cfgH)
+        for lg in xl
+            if lg.fail == ""
+                if lg.dir == 1
+                    strongL := lg.lo
+                else
+                    strongH := lg.hi
+                f_leg(ctxE, lg, 2)
+            else
+                f_reject(lg, 2)
+
+    // 3) HTF: break check, bias, legs
+    if htfNew
+        roomAtr := hATR
+        if htfBreak
+            for z in zones
+                if not z.ctx and z.status < 3 and hTC > z.tCreate and (z.dir == 1 ? hC < z.bot : hC > z.top)
+                    z.status := 4
+                    z.tDead  := time
+        array<Leg> hl = htfE.feed(hO, hH, hL, hC, hV, hT, hTC, hATR, hVA, cfgH)
+        int age = htfE.n - 1 - htfE.lastBrk
+        if htfE.trend == 0 or age > rangeN
+            biasDir := 0
+            biasTxt := "RANGE"
+        else
+            biasDir := htfE.trend
+            biasTxt := htfE.choch ? (htfE.trend == 1 ? "CHoCH ↑" : "CHoCH ↓") : (htfE.trend == 1 ? "BULL" : "BEAR")
+        for lg in hl
+            if lg.fail == ""
+                nHtfLegs += 1
+                if f_leg(htfE, lg, 1)
+                    nHtfZones += 1
+            else
+                f_reject(lg, 1)
+
+    // 4) chart-TF legs
+    array<Leg> cl = ltfE.feed(open, high, low, close, volume, time, time_close, cAtr, cVa, cfg)
+    for lg in cl
+        if lg.fail == ""
+            nLtfLegs += 1
+            if f_leg(ltfE, lg, 0)
+                nLtfZones += 1
+        else
+            f_reject(lg, 0)
+
+    // 5) zone status + alerts
+    for z in zones
+        if z.status < 3 and z.tCreate < time
+            bool touched = z.dir == 1 ? low <= z.top : high >= z.bot
+            bool inside  = close <= z.top and close >= z.bot
+            bool beyond  = z.dir == 1 ? close < z.bot : close > z.top
+            bool invalid = z.dir == 1 ? close < z.origin : close > z.origin
+            if touched and z.status == 0 and f_eligible(z)
+                z.armLeft := sigWin
+            if z.armLeft > 0
+                if beyond
+                    z.armLeft := 0
+                else if z.dir == 1 ? close > z.top : close < z.bot
+                    z.armLeft := 0
+                    float sl = z.dir == 1 ? z.bot - slAtr * roomAtr : z.top + slAtr * roomAtr
+                    float risk = (close - sl) * z.dir
+                    if showSig and risk > 0
+                        float tp = close + z.dir * tpR * risk
+                        string sigTxt = (z.dir == 1 ? "LONG " : "SHORT ") + f_tierLbl(z) + " " + f_tags(z) + "\nSL " + str.tostring(sl, format.mintick) + "\nTP " + str.tostring(tp, format.mintick)
+                        label.new(bar_index, z.dir == 1 ? low : high, sigTxt, style = z.dir == 1 ? label.style_label_up : label.style_label_down, color = z.dir == 1 ? color.new(color.green, 10) : color.new(color.red, 10), textcolor = color.white, size = size.small)
+                        alert(sigTxt + "\n" + syminfo.ticker, alert.freq_once_per_bar_close)
+                else
+                    z.armLeft := z.armLeft - 1
+            if touched and z.status == 0 and not z.ctx and f_vis(z)
+                string rng = str.tostring(z.bot, format.mintick) + " – " + str.tostring(z.top, format.mintick)
+                string side = z.dir == 1 ? "demand" : "supply"
+                string kind = f_aPlus(z) ? "A+ FRESH NESTED " : z.nested ? "FRESH NESTED " : "Fresh "
+                alert(kind + f_tierLbl(z) + " LVN (" + side + ") touched on " + syminfo.ticker + ": " + rng, alert.freq_once_per_bar_close)
+            if touched
+                z.touches := z.touches + 1
+            if inside
+                z.inside := z.inside + 1
+            z.beyond := beyond ? z.beyond + 1 : 0
+            if z.ctx
+                if invalid
+                    z.status := 5
+                else if touched and z.status == 0
+                    z.status := 1
+            else if invalid
+                z.status := 5
+            else if z.beyond >= brokeN
+                z.status := 4
+            else if z.inside >= fillN
+                z.status := 3
+            else if z.htf and z.inside >= weakN
+                z.status := 2
+            else if touched and z.status == 0
+                z.status := 1
+            if z.status >= 3
+                z.tDead := time
+                z.armLeft := 0
+
+// ───────────────────────── Drawing (last bar only) ─────────────────────────
+plot(showStrong ? strongH : na, "1H strong high", color.new(color.red, 20), 2, plot.style_linebr)
+plot(showStrong ? strongL : na, "1H strong low", color.new(color.lime, 20), 2, plot.style_linebr)
+
+var table tbl = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 25), border_width = 1)
+if barstate.islast
+    int liveH = 0
+    int liveC = 0
+    int liveA = 0
+    Zone near = na
+    float nearD = na
+    for z in zones
+        f_draw(z)
+        if z.status < 3 and not z.ctx
+            if z.htf
+                liveH += 1
+            else
+                liveC += 1
+                if f_aPlus(z)
+                    liveA += 1
+            float d = math.abs(close - (z.top + z.bot) / 2)
+            if na(nearD) or d < nearD
+                nearD := d
+                near  := z
+    string nearTxt = "none"
+    if not na(near)
+        nearTxt := f_tierLbl(near) + (near.dir == 1 ? " demand " : " supply ") + str.tostring(near.bot, format.mintick) + " – " + str.tostring(near.top, format.mintick) + "  " + f_stName(near.status) + (near.nested ? " NESTED" : "") + (f_vis(near) ? "" : "  (hidden by filter)")
+    if showTbl
+        color bc = biasDir == 1 ? color.lime : biasDir == -1 ? color.red : color.gray
+        string ctxTxt = ctxE.trend == 1 ? "BULL" : ctxE.trend == -1 ? "BEAR" : "n/a"
+        string strongTxt = (na(strongH) ? "–" : str.tostring(strongH, format.mintick)) + " / " + (na(strongL) ? "–" : str.tostring(strongL, format.mintick))
+        table.cell(tbl, 0, 0, htfLbl + " bias", text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 0, biasTxt, text_color = bc, text_size = size.small)
+        table.cell(tbl, 0, 1, ctxLbl + " structure", text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 1, ctxTxt, text_color = color.white, text_size = size.small)
+        table.cell(tbl, 0, 2, ctxLbl + " strong high / low", text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 2, strongTxt, text_color = color.white, text_size = size.small)
+        table.cell(tbl, 0, 3, "Volume data", text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 3, ltfOk ? ltfLbl + " intrabars" : "chart bars", text_color = ltfOk ? color.lime : color.orange, text_size = size.small)
+        table.cell(tbl, 0, 4, "Live zones " + htfLbl + " / " + chartLbl, text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 4, str.tostring(liveH) + " / " + str.tostring(liveC), text_color = color.white, text_size = size.small)
+        table.cell(tbl, 0, 5, "Legs " + htfLbl + " / " + chartLbl, text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 5, str.tostring(nHtfLegs) + " / " + str.tostring(nLtfLegs), text_color = color.white, text_size = size.small)
+        table.cell(tbl, 0, 6, "Zones made " + htfLbl + " / " + chartLbl, text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 6, str.tostring(nHtfZones) + " / " + str.tostring(nLtfZones), text_color = color.white, text_size = size.small)
+        table.cell(tbl, 0, 7, "Live A+ setups", text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 7, str.tostring(liveA), text_color = color.lime, text_size = size.small)
+        table.cell(tbl, 0, 8, "Nearest live zone", text_color = color.white, text_size = size.small)
+        table.cell(tbl, 1, 8, nearTxt, text_color = color.yellow, text_size = size.small)
