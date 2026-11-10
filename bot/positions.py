@@ -149,6 +149,7 @@ class LiveExecutor:
         self.pos = state.setdefault("live_positions", {})
         self.risk, self.rest, self.catalog, self.router = risk, rest, catalog, router
         self.exchange_syms = set()
+        self.warned = set()
 
     def open_symbols(self):
         return set(self.pos) | self.exchange_syms
@@ -265,7 +266,9 @@ class LiveExecutor:
             has_stop = any((o.get("type") or o.get("orderType")) in ("STOP_MARKET", "STOP") for o in oo)
             if not has_stop:
                 if p is None:
-                    log.error("%s UNMANAGED position %s with no stop - not touching it", sym, r["positionAmt"])
+                    if sym not in self.warned:  # once per symbol, not every 15 s
+                        self.warned.add(sym)
+                        log.error("%s UNMANAGED position %s with no stop (not this bot's) - not touching it", sym, r["positionAmt"])
                     continue
                 log.error("%s managed position has no stop - placing it", sym)
                 stop, err = self.router.place_stop(sym, p["direction"], p["sl"])
