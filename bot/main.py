@@ -141,7 +141,7 @@ class Bot:
         if age > 90_000:
             journal.write("ENTRY_SKIP", sym=sig["sym"], key=sig["key"], why=f"signal is {age / 1000:.0f} s old (data was late)")
             return
-        why = self.risk.blocked(sig["sym"], self.ex.open_symbols())
+        why = self.risk.blocked(sig["sym"], self.ex.open_symbols(), len(self.ex.pos))
         if why:
             journal.write("ENTRY_SKIP", sym=sig["sym"], key=sig["key"], why="; ".join(why))
             log.warning("%s signal not taken: %s", sig["sym"], "; ".join(why))

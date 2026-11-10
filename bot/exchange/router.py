@@ -150,6 +150,21 @@ class Router:
             log.error("%s algo cancel failed: %s", symbol, e)
             return None
 
+    def cancel_ours(self, symbol):
+        """Cancels only this bot's open orders (client id starts with ORDER_TAG) on the symbol."""
+        try:
+            normal = list(self.rest.open_orders(symbol) or [])
+            algo = list(self.rest.open_algo_orders(symbol) or [])
+        except ApiError as e:
+            log.error("%s open orders failed, nothing cancelled: %s", symbol, e)
+            return
+        for o in normal:
+            if is_ours(o.get("clientOrderId")):
+                self.cancel(symbol, o.get("orderId"))
+        for o in algo:
+            if is_ours(o.get("clientAlgoId")):
+                self.cancel_algo(symbol, o.get("algoId"))
+
     def cancel_all(self, symbol):
         for f in (self.rest.cancel_all_orders, self.rest.cancel_all_algo_orders):
             try:

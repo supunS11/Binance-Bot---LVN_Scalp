@@ -57,8 +57,9 @@ class Risk:
         if self.s["day"] != utc_day():
             self.s.update(day=utc_day(), r_today=0.0)
 
-    def blocked(self, sym, open_syms):
-        """Reasons no new entry is allowed now (empty = allowed)."""
+    def blocked(self, sym, open_syms, own_count):
+        """Reasons no new entry is allowed now (empty = allowed). open_syms = every symbol with a position on
+        the account (another bot's too: one-way mode allows one position per symbol); own_count = this bot's."""
         self._roll()
         why = []
         if os.path.exists(C.KILL_SWITCH_FILE):
@@ -70,8 +71,8 @@ class Risk:
                        f"{dt.datetime.fromtimestamp(self.s['cooldown_until'] / 1000):%H:%M}")
         if sym in open_syms:
             why.append("already a position on this symbol")
-        if len(open_syms) >= C.MAX_POSITIONS:
-            why.append(f"{len(open_syms)} positions open (max {C.MAX_POSITIONS})")
+        if own_count >= C.MAX_POSITIONS:
+            why.append(f"{own_count} LVN positions open (max {C.MAX_POSITIONS})")
         return why
 
     def record(self, net_r):
@@ -254,7 +255,7 @@ class LiveExecutor:
         for sym in list(self.pos):  # 1. finished
             if sym not in ex:
                 p = self.pos.pop(sym)
-                self.router.cancel_all(sym)
+                self.router.cancel_ours(sym)  # never cancel another bot's orders on this symbol
                 self._settle(p)
         for sym, r in ex.items():  # 2. no stop
             p = self.pos.get(sym)
