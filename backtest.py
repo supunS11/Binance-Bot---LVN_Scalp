@@ -370,7 +370,9 @@ def confluence(b, leg, top, bot, fib_a=0.5, fib_b=0.786, ob_look=3):
     return fib, fvg, ob
 
 
-def run_symbol(symbol, m, args):
+def run_symbol(symbol, m, args, on_close=None):
+    """on_close(j, zones, bc): optional hook called after every 5m bar j is fully processed (the zone state a
+    live snapshot taken at that bar's close would see). It does not change anything here."""
     bc = add_indicators(resample(m, CHART))
     bh = add_indicators(resample(m, HTF))
     bx = add_indicators(resample(m, CTX))
@@ -546,6 +548,8 @@ def run_symbol(symbol, m, args):
         for leg in ec.feed():
             stats["legs_5m"] += 1
             make_zones(leg, 0, t + CHART, j, t)
+        if on_close is not None:
+            on_close(j, zones, bc)
     stats["live"] = zones
     stats["atr"] = float(bc["atr"][-1])
     stats["close"] = float(bc["c"][-1])
