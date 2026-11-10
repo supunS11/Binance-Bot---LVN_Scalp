@@ -79,6 +79,7 @@ OF_MIN_PASS = int(env_float("OF_MIN_PASS", 2))  # order flow: signal when at lea
 
 # Stop / target
 SL_BUFFER_ATR = env_float("SL_BUFFER_ATR", 0.50)  # beyond the zone far edge and the reaction low (Pine slAtr)
+TP_EXT = env_float("TP_EXT", 0.0)  # 0 = target at the leg extreme; 0.272 = 1.272 Fib extension of the pullback (leg extreme to reaction extreme)
 TP_FRONT_ATR = env_float("TP_FRONT_ATR", 0.05)  # target sits this far before the liquidity / opposing zone
 MIN_RR = env_float("MIN_RR", 2.0)  # after fees
 FEE = env_float("FEE", 0.0005)  # taker, per side

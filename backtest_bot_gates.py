@@ -14,6 +14,14 @@ Variants (all thresholds = the bot's config, fixed before the first run):
   B  CHoCH only (no order flow gates)
   C  no confirmation: limit at the near edge at the touch (same WAIT / SLOW / trend / zone choice, same SL / TP rules)
   D  A without the 4H trend filter
+  RR fixes (each = A with one change, settings fixed before the run):
+  E  min RR 1.5 after fees (A: 2.0)
+  F  target at the 1.272 extension of the pullback (leg extreme + 0.272 x (leg extreme - reaction extreme)),
+     still cut in front of a fresh opposing zone
+  G  retest entry: if RR at the CHoCH close is < 2, a limit at the broken CHoCH level instead (RR >= 2 at that
+     price), valid 30 1m candles, cancelled if the target trades before the fill. RR >= 2 at the close = as A.
+
+    VARIANTS=ACEFG OUT=backtest_rr_fixes_report.md python backtest_bot_gates.py
 
 Execution (= the paper executor): A / B / D fill at the next 1m open after the confirmation close, skipped if
 RR at that price is < 2. C fills at the near edge (or the open if it gapped through). Stop first when stop and
@@ -24,6 +32,7 @@ Fees 0.05% per side. One position per symbol per variant. Portfolio limits (max 
 """
 import collections
 import multiprocessing as mp
+import os
 import types
 
 import numpy as np
@@ -34,8 +43,11 @@ from backtest_lvn_reaction import DATA
 from backtest_scalp_1h5m import strength
 
 FIVE, DAY = 5 * MIN, 86_400_000
-VARIANTS = ("A", "B", "C", "D")
-NAMES = {"A": "A: bot as live (CHoCH + 2 of 5 order flow gates; liq / book not in data)", "B": "B: CHoCH only, no order flow gates",
+VARIANTS = tuple(os.environ.get("VARIANTS", "ABCD"))
+OUT = os.environ.get("OUT", "backtest_bot_gates_report.md")
+RETEST_MIN = 30
+NAMES = {"E": "E: A with min RR 1.5", "F": "F: A with the target at the 1.272 extension",
+         "G": "G: A, retest limit at the CHoCH level when RR at the close < 2","A": "A: bot as live (CHoCH + 2 of 5 order flow gates; liq / book not in data)", "B": "B: CHoCH only, no order flow gates",
          "C": "C: limit at the near edge, no confirmation", "D": "D: A without the 4H filter"}
 
 
@@ -120,7 +132,14 @@ def job(spec):
     # ---------------- the bot's watch code, with per-variant gates and a journal collector
     events = {v: [] for v in VARIANTS}
     cur = dict(v="A", t=0)
-    journal.write = lambda event, **row: events[cur["v"]].append((cur["t"], event, _why(row), (row.get("zone") or {}).get("key")))
+    raw = {v: [] for v in VARIANTS}
+
+    def jw(event, **row):
+        events[cur["v"]].append((cur["t"], event, _why(row), (row.get("zone") or {}).get("key")))
+        if event == "CONFIRM_REJECT":
+            raw[cur["v"]].append((cur["t"], "; ".join(row.get("why") or [])))
+
+    journal.write = jw
     W.now_ms = lambda: 0
     flow = types.SimpleNamespace(liquidations=lambda *a: {"SELL": 0.0, "BUY": 0.0}, imbalance=lambda *a: None)
     orig_trend, orig_abs, orig_shift = Z.trend_ok, W.absorption, W.delta_shift
@@ -128,7 +147,26 @@ def job(spec):
     def trend_no4h(snap, d):
         return [w for w in orig_trend(snap, d) if "4H" not in w]
 
-    gates = dict(A=(orig_trend, orig_abs, orig_shift),
+    orig_plan, holder = W.make_plan, dict(level=None)
+
+    def plan_retest(d, entry, *rest):
+        p, why = orig_plan(d, entry, *rest)
+        lvl = holder["level"]
+        if p or lvl is None or not why.startswith("RR"):
+            return p, why
+        p2, _ = orig_plan(d, lvl, *rest)
+        return (dict(p2, retest=True), None) if p2 else (None, why)
+
+    class RetestWatcher(W.Watcher):
+        def _confirm(self, w, k, mark):
+            holder["level"] = w["react"].level
+            try:
+                return super()._confirm(w, k, mark)
+            finally:
+                holder["level"] = None
+
+    gates = dict(A=(orig_trend, orig_abs, orig_shift), E=(orig_trend, orig_abs, orig_shift),
+                 F=(orig_trend, orig_abs, orig_shift), G=(orig_trend, orig_abs, orig_shift),
                  B=(orig_trend, lambda m_, i0, i1, *a: i1, lambda *a: (True, 0.0, 0.0)),
                  C=(orig_trend, orig_abs, orig_shift),
                  D=(trend_no4h, orig_abs, orig_shift))
@@ -159,18 +197,21 @@ def job(spec):
     watchers = {}
     for v in VARIANTS:
         cur["v"] = v
-        wt = (LimitWatcher if v == "C" else W.Watcher)(store, flow)
+        wt = (LimitWatcher if v == "C" else RetestWatcher if v == "G" else W.Watcher)(store, flow)
         wt.warmup()
         watchers[v] = wt
     signals = {v: [] for v in VARIANTS}
 
-    of_min = C.OF_MIN_PASS
+    of_min, base_rr = C.OF_MIN_PASS, C.MIN_RR
 
     def set_gates(v):
         tr, ab, sh = gates[v]
         Z.trend_ok = W.trend_ok = tr
         W.absorption, W.delta_shift = ab, sh
         C.OF_MIN_PASS = 0 if v == "B" else of_min
+        C.MIN_RR = 1.5 if v == "E" else base_rr
+        C.TP_EXT = 0.272 if v == "F" else 0.0
+        W.make_plan = plan_retest if v == "G" else orig_plan
         cur["v"] = v
 
     def on_close(j, live, bc):
@@ -204,7 +245,21 @@ def job(spec):
                 skips["position already open on the symbol"] += 1
                 continue
             d = s["dir"]
-            if v == "C":
+            set_gates(v)  # MIN_RR / TP_EXT of this variant for the checks below
+            if s.get("retest"):
+                k0, k, entry = int(np.searchsorted(t, s["t"])), None, s["entry"]
+                for i in range(k0, min(n, k0 + RETEST_MIN)):
+                    if (m["l"][i] <= entry) if d == 1 else (m["h"][i] >= entry):
+                        k = i
+                        break
+                    if (m["h"][i] >= s["tp"]) if d == 1 else (m["l"][i] <= s["tp"]):
+                        break
+                if k is None:
+                    skips["retest limit not filled (30 min or target first)"] += 1
+                    continue
+                o_k = float(m["o"][k])
+                entry = min(entry, o_k) if d == 1 else max(entry, o_k)
+            elif v == "C":
                 k, entry = s["k_fill"], s["entry"]
             else:
                 k = int(np.searchsorted(t, s["t"]))  # next candle after the confirmation close
@@ -214,7 +269,7 @@ def job(spec):
                 if (entry - s["sl"]) * d <= 0 or (s["tp"] - entry) * d <= 0 or P.rr_net(entry, s["sl"], s["tp"]) < C.MIN_RR:
                     skips["RR < 2 at the fill price"] += 1
                     continue
-            r = exit_sim(m, k, d, entry, s["sl"], s["tp"], C, limit=v == "C")
+            r = exit_sim(m, k, d, entry, s["sl"], s["tp"], C, limit=v == "C" or bool(s.get("retest")))
             if r is None:
                 skips["still open at the end of the data"] += 1
                 continue
@@ -225,9 +280,9 @@ def job(spec):
             busy_until = int(t[xk]) + MIN
             trades.append(dict(sym=sym, period=s0[:4], late=s["t"] >= split, entry_time=int(t[k]), exit_time=int(t[xk]),
                                net_r=net, gross_r=gross, reason=why, kind=s["kind"], tp_kind=s.get("tp_kind"),
-                               risk_pct=risk / entry * 100, hold_min=(int(t[xk]) - int(t[k])) / MIN))
+                               retest=bool(s.get("retest")), risk_pct=risk / entry * 100, hold_min=(int(t[xk]) - int(t[k])) / MIN))
         ev = [(e, w, key) for tt, e, w, key in events[v] if lo <= tt < hi]
-        out[v] = dict(trades=trades, skips=skips, events=ev)
+        out[v] = dict(trades=trades, skips=skips, events=ev, rejects=[w for tt, w in raw[v] if lo <= tt < hi])
     print(sym, s0[:4], {v: len(out[v]["trades"]) for v in VARIANTS}, flush=True)
     return dict(sym=sym, period=s0[:4], days=(hi - lo) / DAY, out=out)
 
@@ -325,8 +380,13 @@ def main():
         tn = [x for r in new for x in r["out"][v]["trades"]]
         o.append(f"- Trades: {len(tn)} (exits: {dict(collections.Counter(x['reason'] for x in tn))}, "
                  f"median hold {np.median([x['hold_min'] for x in tn]) if tn else float('nan'):.0f} min)")
+    o += ["", "## Every CONFIRM_REJECT (all coins, both periods)", ""]
+    for v in VARIANTS:
+        for r in res:
+            for w in r["out"][v]["rejects"]:
+                o.append(f"- {v} {r['sym']} {r['period']}: {w}")
     text = "\n".join(o) + "\n"
-    with open("backtest_bot_gates_report.md", "w", encoding="utf-8") as f:
+    with open(OUT, "w", encoding="utf-8") as f:
         f.write(text)
     print(text)
 
