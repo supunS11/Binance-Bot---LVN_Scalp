@@ -54,6 +54,7 @@ CTX_BARS = 500  # 4H candles for the 4H trend filter
 
 # Trade filter + LVN quality (Pine inputs minStop, slAtr, minAge, slowX)
 MIN_STOP = 0.30  # % : 5m zone, entry at the near edge, stop 0.5 ATR beyond the far edge
+ARM_MIN_STOP = env_bool("ARM_MIN_STOP", "true")  # true: a 5m LVN whose zone stop is < MIN_STOP is not armed; false: armed, the plan widens the stop to MIN_STOP
 SL_ATR = 0.50
 MIN_AGE_H = 2.0  # WAIT: no entry in the first 2 h (5m zones)
 SLOW_X = 2.0  # SLOW: price travelled <= 2 ATR toward the zone in the last 30 min

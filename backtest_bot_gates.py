@@ -22,6 +22,11 @@ Variants (all thresholds = the bot's config, fixed before the first run):
      price), valid 30 1m candles, cancelled if the target trades before the fill. RR >= 2 at the close = as A.
   Confirmation at the zone instead of CHoCH (stop / target as C: far edge + 0.5 ATR, leg extreme; first trigger
   within 30 min of the touch only; entry at the next 1m open, RR >= 2 after fees):
+  Arming / touch rules (each = A with one change; M = all three):
+  J  no "zone stop >= 0.30%" arming filter: the zone is armed, the plan widens the stop to 0.30%
+  K  no WAIT (zones younger than 2 h are traded)
+  L  1H trend direction only, STRONG not needed (4H filter kept)
+  M  J + K + L
   H  rejection candle: first 1m close back beyond the near edge (long: close > near edge)
   I  order flow candle: a 1m candle inside the zone, close >= open (long), with 2 of 3: absorption on it, its own
      delta / volume >= +0.10, CVD divergence on the approach
@@ -51,7 +56,8 @@ FIVE, DAY = 5 * MIN, 86_400_000
 VARIANTS = tuple(os.environ.get("VARIANTS", "ABCD"))
 OUT = os.environ.get("OUT", "backtest_bot_gates_report.md")
 RETEST_MIN = 30
-NAMES = {"H": "H: rejection candle at the zone (1m close back beyond the near edge)",
+NAMES = {"J": "J: A without the zone stop >= 0.30% arming filter", "K": "K: A without WAIT 2 h",
+         "L": "L: A with 1H direction only (no STRONG)", "M": "M: A with J + K + L", "H": "H: rejection candle at the zone (1m close back beyond the near edge)",
          "I": "I: order flow candle at the zone (2 of: absorption, delta flip, CVD divergence)", "E": "E: A with min RR 1.5", "F": "F: A with the target at the 1.272 extension",
          "G": "G: A, retest limit at the CHoCH level when RR at the close < 2","A": "A: bot as live (CHoCH + 2 of 5 order flow gates; liq / book not in data)", "B": "B: CHoCH only, no order flow gates",
          "C": "C: limit at the near edge, no confirmation", "D": "D: A without the 4H filter"}
@@ -153,6 +159,9 @@ def job(spec):
     def trend_no4h(snap, d):
         return [w for w in orig_trend(snap, d) if "4H" not in w]
 
+    def trend_no_strong(snap, d):
+        return [w for w in orig_trend(snap, d) if "STRONG" not in w]
+
     orig_plan, holder = W.make_plan, dict(level=None)
 
     def plan_retest(d, entry, *rest):
@@ -174,6 +183,8 @@ def job(spec):
     gates = dict(A=(orig_trend, orig_abs, orig_shift), E=(orig_trend, orig_abs, orig_shift),
                  F=(orig_trend, orig_abs, orig_shift), G=(orig_trend, orig_abs, orig_shift),
                  H=(orig_trend, orig_abs, orig_shift), I=(orig_trend, orig_abs, orig_shift),
+                 J=(orig_trend, orig_abs, orig_shift), K=(orig_trend, orig_abs, orig_shift),
+                 L=(trend_no_strong, orig_abs, orig_shift), M=(trend_no_strong, orig_abs, orig_shift),
                  B=(orig_trend, lambda m_, i0, i1, *a: i1, lambda *a: (True, 0.0, 0.0)),
                  C=(orig_trend, orig_abs, orig_shift),
                  D=(trend_no4h, orig_abs, orig_shift))
@@ -252,7 +263,7 @@ def job(spec):
         watchers[v] = wt
     signals = {v: [] for v in VARIANTS}
 
-    of_min, base_rr = C.OF_MIN_PASS, C.MIN_RR
+    of_min, base_rr, base_age = C.OF_MIN_PASS, C.MIN_RR, C.MIN_AGE_H
 
     def set_gates(v):
         tr, ab, sh = gates[v]
@@ -261,6 +272,8 @@ def job(spec):
         C.OF_MIN_PASS = 0 if v == "B" else of_min
         C.MIN_RR = 1.5 if v == "E" else base_rr
         C.TP_EXT = 0.272 if v == "F" else 0.0
+        C.ARM_MIN_STOP = v not in ("J", "M")
+        C.MIN_AGE_H = 0.0 if v in ("K", "M") else base_age
         W.make_plan = plan_retest if v == "G" else orig_plan
         cur["v"] = v
 
