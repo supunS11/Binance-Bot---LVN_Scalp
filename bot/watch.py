@@ -170,12 +170,21 @@ class Watcher:
             top, bot, kind = z["top"], z["bot"], "LVN"
             if sd and C.SD_FALLBACK and (sd["near"] - z["far"]) * d < 0:
                 fallback = dict(sd)
-        w = self._new_watch(z["key"], z["key"], kind, d, top, bot, z["ext"], k, fallback, z)
+        w = self._new_watch(z["key"], z["key"], kind, d, top, bot, self._leg_ext(z, k), k, fallback, z)
         w["approach_atr"] = round(float(appr), 2)
         journal.write("WATCH_START", **base, poi=dict(kind=kind, top=top, bot=bot), fallback_sd=fallback,
                       cvd_divergence=w["cvd_div"])
         log.info("%s WATCH %s %s %s-%s (%s)", self.sym, z["side"], kind, _px(bot), _px(top), "touch")
         return self._step(w, k)
+
+    def _leg_ext(self, z, k):
+        """The swing the continuation goes for: the leg extreme, or a newer extreme made after the zone and before
+        this touch (long: price went above the leg high, then pulled back all the way to the zone)."""
+        m, d = self.store.m, z["dir"]
+        i0 = int(np.searchsorted(m["t"], z["made"]))
+        if i0 >= k:
+            return float(z["ext"])
+        return float(max(z["ext"], m["h"][i0:k].max()) if d == 1 else min(z["ext"], m["l"][i0:k].min()))
 
     def _new_watch(self, key, zone_key, kind, d, top, bot, leg_ext, k, fallback, z):
         m = self.store.m
@@ -223,7 +232,8 @@ class Watcher:
                 self.pending[p["key"]] = p
                 return self._pending_step(p, k)
             return None
-        if (h >= w["leg_ext"]) if d == 1 else (l <= w["leg_ext"]):
+        # not on the touch candle: its high (long) can come before the touch, on the way down to the zone
+        if t > w["t_touch"] and ((h >= w["leg_ext"]) if d == 1 else (l <= w["leg_ext"])):
             self._end(w, "price reached the leg extreme before a confirmation")
             return None
         rc = w["react"].feed(t, h, l, c, self.swings)
